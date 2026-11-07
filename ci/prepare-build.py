@@ -66,6 +66,14 @@ def main():
     )
 
     app_gradle = path("TMessagesProj_App", "build.gradle")
+    # Sign with v1 (JAR) + v2 + v3: AGP drops v1 for minSdk >= 24, but some file managers, third-party
+    # installers and OEM security scanners still parse the v1 signature and report "problem parsing
+    # the package" without it.
+    replace_once(
+        app_gradle,
+        "        release {\n            storeFile file('../Your_Key.jks')\n            storePassword 'Your_Password'\n            keyAlias 'Your_Alias'\n            keyPassword 'Your_Password'\n        }\n",
+        "        release {\n            storeFile file('../Your_Key.jks')\n            storePassword 'Your_Password'\n            keyAlias 'Your_Alias'\n            keyPassword 'Your_Password'\n            enableV1Signing true\n            enableV2Signing true\n            enableV3Signing true\n        }\n",
+    )
     with open(app_gradle, encoding="utf-8") as f:
         text = f.read()
     marker = "        afat {\n            ndk {\n                //noinspection ChromeOsAbiSupport\n                abiFilters \"armeabi-v7a\", \"arm64-v8a\"/*, \"x86\", \"x86_64\"*/\n"
