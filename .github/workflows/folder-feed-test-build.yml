@@ -1,0 +1,187 @@
+# Builds an installable test APK of the merged folder channels feed branch and checks the feature
+# on an emulator. Not the official release pipeline: closed-source parts are replaced by stubs
+# (see ci/), and the APK is signed with a throwaway key (ci/ci-test-signing.jks).
+#
+# Optional repository secrets:
+#   TG_APP_ID, TG_APP_HASH  your API id/hash from https://my.telegram.org. Used by the APK and by the
+#                           emulator test (which logs in to Telegram's *test* servers). Without them
+#                           the APK falls back to upstream Telegram's public defaults and the emulator
+#                           job only runs a smoke test.
+name: Folder feed test build
+
+on:
+  push:
+    branches:
+      - claude/telegram-merged-folder-channels-clolue
+    paths-ignore:
+      - '**.md'
+  workflow_dispatch:
+
+concurrency:
+  group: folder-feed-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+env:
+  APP_PACKAGE: uz.unnarsx.cherrygram.beta
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift /usr/local/share/boost \
+            /opt/hostedtoolcache/CodeQL /usr/local/lib/node_modules /usr/local/share/powershell /usr/share/miniconda || true
+          df -h /
+
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Android SDK packages
+        run: |
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKMANAGER" --licenses > /dev/null
+          "$SDKMANAGER" "platforms;android-36" "build-tools;36.0.0" "ndk;27.2.12479018" "cmake;3.22.1" > /dev/null
+          sudo apt-get update -qq && sudo apt-get install -y -qq ccache
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache
+          key: ccache-${{ hashFiles('TMessagesProj/jni/CMakeLists.txt', 'ci/native-stubs/**', 'ci/prepare-build.py') }}-${{ github.sha }}
+          restore-keys: |
+            ccache-${{ hashFiles('TMessagesProj/jni/CMakeLists.txt', 'ci/native-stubs/**', 'ci/prepare-build.py') }}-
+            ccache-
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Prepare sources (stubs, signing, ABIs)
+        env:
+          TG_APP_ID: ${{ secrets.TG_APP_ID }}
+          TG_APP_HASH: ${{ secrets.TG_APP_HASH }}
+        run: python3 ci/prepare-build.py
+
+      - name: Build test APK
+        env:
+          CCACHE_DIR: /home/runner/.cache/ccache
+          CCACHE_BASEDIR: ${{ github.workspace }}
+          CCACHE_MAXSIZE: 6G
+          CCACHE_COMPILERCHECK: content
+        run: |
+          ccache -z || true
+          ./gradlew :TMessagesProj_App:assembleAfatDebug -PAPP_PACKAGE=$APP_PACKAGE --stacktrace --no-daemon
+          ccache -s || true
+
+      - name: Collect APK
+        id: apk
+        run: |
+          mkdir -p apk-out
+          SRC=$(find TMessagesProj_App/build/outputs/apk -name '*.apk' | head -n 1)
+          NAME="Cherrygram-folder-feed-test-${GITHUB_SHA::7}.apk"
+          cp "$SRC" "apk-out/$NAME"
+          ls -la apk-out
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cherrygram-folder-feed-apk
+          path: apk-out/*.apk
+          retention-days: 14
+
+      - name: Publish rolling pre-release (direct download link for phones)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release delete folder-feed-test --yes --cleanup-tag || true
+          gh release create folder-feed-test "apk-out/${{ steps.apk.outputs.name }}" \
+            --prerelease --target "$GITHUB_SHA" \
+            --title "Folder feed test build (${GITHUB_SHA::7})" \
+            --notes "Test build of the merged folder channels feed from branch ${GITHUB_REF_NAME} (commit ${GITHUB_SHA}). Package ${APP_PACKAGE} (installs next to regular Cherrygram), signed with a throwaway CI key, closed-source Cherrygram extras stubbed out. Not an official build."
+
+  emulator-test:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: cherrygram-folder-feed-apk
+          path: apk
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Prepare test-server account
+        env:
+          TG_APP_ID: ${{ secrets.TG_APP_ID }}
+          TG_APP_HASH: ${{ secrets.TG_APP_HASH }}
+        run: |
+          mkdir -p account
+          if [ -n "$TG_APP_ID" ] && [ -n "$TG_APP_HASH" ]; then
+            pip install -q telethon
+            python3 ci/emulator/tg_test_account.py setup --out account || echo "account setup failed"
+          else
+            echo "TG_APP_ID/TG_APP_HASH not set: smoke test only"
+          fi
+
+      - name: Run UI test on emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        env:
+          TG_APP_ID: ${{ secrets.TG_APP_ID }}
+          TG_APP_HASH: ${{ secrets.TG_APP_HASH }}
+        with:
+          api-level: 34
+          target: google_apis
+          arch: x86_64
+          profile: pixel_6
+          ram-size: 4096M
+          disk-size: 4096M
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -no-snapshot
+          script: python3 ci/emulator/ui_test.py --apk "$(ls apk/*.apk | head -n 1)" --out ci-out --account account --package "$APP_PACKAGE"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: emulator-screenshots
+          path: ci-out
+          retention-days: 14
+
+      - name: Publish screenshots to the ci-screenshots branch
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          [ -d ci-out ] || exit 0
+          cd ci-out
+          rm -f mainconfig.xml
+          git init -q
+          git checkout -q -b ci-screenshots
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          echo "Screenshots for ${GITHUB_SHA}" > COMMIT.txt
+          git add -A
+          git commit -q -m "Emulator screenshots for ${GITHUB_SHA}"
+          git push -q --force "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" ci-screenshots
