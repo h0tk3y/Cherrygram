@@ -105,6 +105,12 @@ jobs:
           cp "$SRC" "apk-out/$NAME"
           ls -la apk-out
           echo "name=$NAME" >> "$GITHUB_OUTPUT"
+          BT="$ANDROID_HOME/build-tools/36.0.0"
+          echo "::group::APK details"
+          sha256sum "apk-out/$NAME"
+          "$BT/apksigner" verify --verbose --print-certs "apk-out/$NAME" | head -n 20
+          "$BT/aapt2" dump badging "apk-out/$NAME" | grep -E "^(package|sdkVersion|targetSdkVersion|native-code|uses-split)" || true
+          echo "::endgroup::"
 
       - uses: actions/upload-artifact@v4
         with:
