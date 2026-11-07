@@ -19,6 +19,16 @@ if [[ ! -d "$ROOT/ci/stubs" || ! -d "$ROOT/TMessagesProj" ]]; then
     exit 1
 fi
 
+# Validate the substitution values before touching the tree.
+if [[ -n "${TG_APP_ID:-}" && ! "$TG_APP_ID" =~ ^[0-9]+$ ]]; then
+    echo "apply-stubs: TG_APP_ID must be a number" >&2
+    exit 1
+fi
+if [[ -n "${TG_APP_HASH:-}" && ! "$TG_APP_HASH" =~ ^[0-9a-fA-F]{32}$ ]]; then
+    echo "apply-stubs: TG_APP_HASH must be 32 hex characters" >&2
+    exit 1
+fi
+
 EXTRA_KT="TMessagesProj/src/main/java/uz/unnarsx/cherrygram/Extra.kt"
 copied_extra=0
 copied=0
@@ -63,20 +73,12 @@ substitute() {
 
 if [[ "$copied_extra" == 1 ]]; then
     if [[ -n "${TG_APP_ID:-}" ]]; then
-        if [[ ! "$TG_APP_ID" =~ ^[0-9]+$ ]]; then
-            echo "apply-stubs: TG_APP_ID must be a number" >&2
-            exit 1
-        fi
         substitute "@TG_APP_ID@" "$TG_APP_ID"
         echo "apply-stubs: set app id in $EXTRA_KT"
     else
         echo "apply-stubs: TG_APP_ID not set, Extra.kt falls back to the upstream app id"
     fi
     if [[ -n "${TG_APP_HASH:-}" ]]; then
-        if [[ ! "$TG_APP_HASH" =~ ^[0-9a-fA-F]{32}$ ]]; then
-            echo "apply-stubs: TG_APP_HASH must be 32 hex characters" >&2
-            exit 1
-        fi
         substitute "@TG_APP_HASH@" "$TG_APP_HASH"
         echo "apply-stubs: set app hash in $EXTRA_KT"
     else
