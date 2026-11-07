@@ -16964,6 +16964,8 @@ public class ChatActivity extends BaseFragment implements
         if (chatMode != MODE_FOLDER_FEED) {
             getMessagesController().addToPollsQueue(dialog_id, pollsToCheck);
             chatMessagesMetadataController.checkMessages(chatAdapter, maxAdapterPosition, minAdapterPosition, currentTime);
+        } else {
+            markFolderFeedVisibleAsRead();
         }
         if (videoPlayerContainer != null) {
             if (!foundTextureViewMessage) {
@@ -48839,6 +48841,57 @@ public class ChatActivity extends BaseFragment implements
             } else {
                 BulletinFactory.of(this).createSimpleBulletin(R.raw.chats_infotip, getString(R.string.CG_FolderFeed_NewPosts), getString(R.string.CG_FolderFeed_Refresh), this::reloadFolderFeed).show();
             }
+        }
+    }
+
+    /** Channel dialog id -> newest real message id already marked as read from the merged feed. */
+    private final LongSparseIntArray folderFeedReadMax = new LongSparseIntArray();
+
+    /** Marks every channel of the merged feed as read up to its newest post visible on screen. */
+    private void markFolderFeedVisibleAsRead() {
+        if (chatMode != MODE_FOLDER_FEED || paused || chatListView == null || inPreviewMode) {
+            return;
+        }
+        LongSparseIntArray maxVisibleIds = new LongSparseIntArray();
+        LongSparseIntArray maxVisibleDates = new LongSparseIntArray();
+        final int listHeight = chatListView.getMeasuredHeight();
+        for (int i = 0, n = chatListView.getChildCount(); i < n; i++) {
+            View child = chatListView.getChildAt(i);
+            if (!(child instanceof ChatMessageCell) || child.getBottom() <= chatListViewPaddingTop || child.getTop() >= listHeight) {
+                continue;
+            }
+            MessageObject messageObject = ((ChatMessageCell) child).getMessageObject();
+            if (messageObject == null || !messageObject.isFolderFeedMessage) {
+                continue;
+            }
+            long did = messageObject.getDialogId();
+            int realId = messageObject.getRealId();
+            if (realId > maxVisibleIds.get(did, 0)) {
+                maxVisibleIds.put(did, realId);
+                maxVisibleDates.put(did, messageObject.messageOwner.date);
+            }
+        }
+        for (int i = 0, n = maxVisibleIds.size(); i < n; i++) {
+            long did = maxVisibleIds.keyAt(i);
+            int maxId = maxVisibleIds.valueAt(i);
+            TLRPC.Dialog dialog = getMessagesController().dialogs_dict.get(did);
+            int readMax = Math.max(dialog != null ? dialog.read_inbox_max_id : 0, folderFeedReadMax.get(did, 0));
+            if (maxId <= readMax) {
+                continue;
+            }
+            int newlyRead = 0;
+            for (int a = 0, size = messages.size(); a < size; a++) {
+                MessageObject messageObject = messages.get(a);
+                if (messageObject.isFolderFeedMessage && messageObject.getDialogId() == did) {
+                    int realId = messageObject.getRealId();
+                    if (realId > readMax && realId <= maxId) {
+                        newlyRead++;
+                    }
+                }
+            }
+            folderFeedReadMax.put(did, maxId);
+            // countDiff 0 would reset the unread counter completely, so always decrement by at least one.
+            getMessagesController().markDialogAsRead(did, maxId, maxId, maxVisibleDates.get(did, 0), false, 0, Math.max(1, newlyRead), false, 0);
         }
     }
 
