@@ -5,8 +5,7 @@
 # Optional repository secrets:
 #   TG_APP_ID, TG_APP_HASH  your API id/hash from https://my.telegram.org. Used by the APK and by the
 #                           emulator test (which logs in to Telegram's *test* servers). Without them
-#                           the APK falls back to upstream Telegram's public defaults and the emulator
-#                           job only runs a smoke test.
+#                           both fall back to upstream Telegram's public defaults (DEFAULT_TG_APP_*).
 name: Folder feed test build
 
 on:
@@ -26,6 +25,11 @@ permissions:
 
 env:
   APP_PACKAGE: uz.unnarsx.cherrygram.beta
+  # Telegram's public Android API credentials, as shipped in upstream Telegram's open source
+  # (TMessagesProj/src/main/java/org/telegram/messenger/BuildVars.java). Used when the TG_APP_ID /
+  # TG_APP_HASH secrets are not set; personal test builds only.
+  DEFAULT_TG_APP_ID: '4'
+  DEFAULT_TG_APP_HASH: 014b35b6184100b085b0d0572f9b5103
 
 jobs:
   build:
@@ -73,8 +77,8 @@ jobs:
 
       - name: Prepare sources (stubs, signing, ABIs)
         env:
-          TG_APP_ID: ${{ secrets.TG_APP_ID }}
-          TG_APP_HASH: ${{ secrets.TG_APP_HASH }}
+          TG_APP_ID: ${{ secrets.TG_APP_ID || env.DEFAULT_TG_APP_ID }}
+          TG_APP_HASH: ${{ secrets.TG_APP_HASH || env.DEFAULT_TG_APP_HASH }}
         run: python3 ci/prepare-build.py
 
       - name: Build test APK
@@ -154,8 +158,8 @@ jobs:
 
       - name: Prepare test-server account
         env:
-          TG_APP_ID: ${{ secrets.TG_APP_ID }}
-          TG_APP_HASH: ${{ secrets.TG_APP_HASH }}
+          TG_APP_ID: ${{ secrets.TG_APP_ID || env.DEFAULT_TG_APP_ID }}
+          TG_APP_HASH: ${{ secrets.TG_APP_HASH || env.DEFAULT_TG_APP_HASH }}
         run: |
           mkdir -p account
           if [ -n "$TG_APP_ID" ] && [ -n "$TG_APP_HASH" ]; then
@@ -168,8 +172,8 @@ jobs:
       - name: Run UI test on emulator
         uses: reactivecircus/android-emulator-runner@v2
         env:
-          TG_APP_ID: ${{ secrets.TG_APP_ID }}
-          TG_APP_HASH: ${{ secrets.TG_APP_HASH }}
+          TG_APP_ID: ${{ secrets.TG_APP_ID || env.DEFAULT_TG_APP_ID }}
+          TG_APP_HASH: ${{ secrets.TG_APP_HASH || env.DEFAULT_TG_APP_HASH }}
         with:
           api-level: 34
           target: google_apis
