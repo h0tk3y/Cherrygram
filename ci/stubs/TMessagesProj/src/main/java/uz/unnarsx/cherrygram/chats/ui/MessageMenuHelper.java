@@ -112,6 +112,7 @@ public class MessageMenuHelper {
     public static class MaxHeightLinearLayout extends LinearLayout {
 
         private int maxHeight;
+        private int maxWidth;
 
         public MaxHeightLinearLayout(Context context) {
             super(context);
@@ -126,6 +127,15 @@ public class MessageMenuHelper {
             return maxHeight;
         }
 
+        public void setMaxWidth(int maxWidth) {
+            this.maxWidth = maxWidth;
+            requestLayout();
+        }
+
+        public int getMaxWidth() {
+            return maxWidth;
+        }
+
         @Override
         protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
             if (maxHeight > 0) {
@@ -133,6 +143,13 @@ public class MessageMenuHelper {
                 int mode = MeasureSpec.getMode(heightMeasureSpec);
                 if (mode == MeasureSpec.UNSPECIFIED || size > maxHeight) {
                     heightMeasureSpec = MeasureSpec.makeMeasureSpec(maxHeight, MeasureSpec.AT_MOST);
+                }
+            }
+            if (maxWidth > 0) {
+                int size = MeasureSpec.getSize(widthMeasureSpec);
+                int mode = MeasureSpec.getMode(widthMeasureSpec);
+                if (mode == MeasureSpec.UNSPECIFIED || size > maxWidth) {
+                    widthMeasureSpec = MeasureSpec.makeMeasureSpec(maxWidth, MeasureSpec.AT_MOST);
                 }
             }
             super.onMeasure(widthMeasureSpec, heightMeasureSpec);
