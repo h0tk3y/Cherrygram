@@ -14377,7 +14377,8 @@ public class MessagesController extends BaseController implements NotificationCe
         if (messageObject == null) return;
         Utilities.stageQueue.postRunnable(() -> {
             long peer = messageObject.getDialogId();
-            int id = messageObject.getId();
+            // Merged feed / hashtag search messages carry synthetic ids, the server needs the real one.
+            int id = messageObject.isFolderFeedMessage || messageObject.searchType != 0 ? messageObject.getRealId() : messageObject.getId();
             ArrayList<Integer> ids = channelViewsToSend.get(peer);
             if (ids == null) {
                 ids = new ArrayList<>();

@@ -1173,6 +1173,8 @@ public class NotificationCenter {
     public static final int cgDestroyCameraX = totalEvents++;
     public static final int cgUpdateSearchFiledVisibility = totalEvents++;
     public static final int cgUnreadCounterChanged = totalEvents++;
+    public static final int cgFolderFeedLoaded = totalEvents++;
+    public static final int cgFolderFeedNewPosts = totalEvents++;
     /** Cherrygram finish */
 
 }

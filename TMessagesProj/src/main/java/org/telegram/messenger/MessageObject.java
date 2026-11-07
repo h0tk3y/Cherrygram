@@ -415,6 +415,8 @@ public class MessageObject {
     public boolean isSavedFiltered;
     public String quick_reply_shortcut;
     public int searchType;
+    /** Cherrygram: message shown in the merged folder channels feed (its id is synthetic, see getRealId()). */
+    public boolean isFolderFeedMessage;
     private BotInlineKeyboard.Source inlineKeyboardSource;
 
     private byte[] randomWaveform;

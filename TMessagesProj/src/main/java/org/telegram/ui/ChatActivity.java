@@ -162,6 +162,7 @@ import org.telegram.messenger.FileLoader;
 import org.telegram.messenger.FileLog;
 import org.telegram.messenger.FlagSecureReason;
 import org.telegram.messenger.HashtagSearchController;
+import uz.unnarsx.cherrygram.chats.feed.FolderFeedController;
 import org.telegram.messenger.ImageLoader;
 import org.telegram.messenger.ImageLocation;
 import org.telegram.messenger.ImageReceiver;
@@ -713,6 +714,10 @@ public class ChatActivity extends BaseFragment implements
     public static final int MODE_SEARCH = 7;
     public static final int MODE_SUGGESTIONS = 8;
     public static final int MODE_WELCOME_MESSAGES = 9;
+    /** Cherrygram: merged feed of every channel of a chat folder, see FolderFeedController. */
+    public static final int MODE_FOLDER_FEED = 100;
+    public int folderFeedFilterId;
+    private boolean folderFeedHasNewPosts;
 
     public static final int SEARCH_THIS_CHAT = 0;
     public static final int SEARCH_MY_MESSAGES = 1;
@@ -3029,6 +3034,11 @@ public class ChatActivity extends BaseFragment implements
             if (searchType == 0 || searchingHashtag == null) {
                 return false;
             }
+        } else if (chatMode == MODE_FOLDER_FEED) {
+            folderFeedFilterId = arguments.getInt("folderFeedFilterId", -1);
+            if (FolderFeedController.findFilter(currentAccount, folderFeedFilterId) == null) {
+                return false;
+            }
         } else {
             return false;
         }
@@ -3176,6 +3186,10 @@ public class ChatActivity extends BaseFragment implements
         }
         if (chatMode == MODE_SEARCH) {
             observersGroup.add(NotificationCenter.hashtagSearchUpdated);
+        }
+        if (chatMode == MODE_FOLDER_FEED) {
+            observersGroup.add(NotificationCenter.cgFolderFeedLoaded);
+            observersGroup.add(NotificationCenter.cgFolderFeedNewPosts);
         }
 
         super.onFragmentCreate();
@@ -3435,6 +3449,8 @@ public class ChatActivity extends BaseFragment implements
             waitingForLoad.add(lastLoadIndex);
             if (chatMode == MODE_SEARCH) {
                 HashtagSearchController.getInstance(currentAccount).searchHashtag(searchingHashtag, classGuid, searchType, lastLoadIndex++);
+            } else if (chatMode == MODE_FOLDER_FEED) {
+                FolderFeedController.getInstance(currentAccount).start(classGuid, folderFeedFilterId, lastLoadIndex++);
             } else if (startLoadFromDate != 0) {
                 getMessagesController().loadMessages(dialog_id, mergeDialogId, false, 30, 0, startLoadFromDate, true, 0, classGuid, 4, 0, chatMode, threadMessageId, replyMaxReadId, lastLoadIndex++, isTopic);
             } else if (startLoadFromMessageId != 0 && (!isThreadChat() || startLoadFromMessageId == highlightMessageId || isTopic)) {
@@ -3533,6 +3549,9 @@ public class ChatActivity extends BaseFragment implements
     @Override
     public void onFragmentDestroy() {
         super.onFragmentDestroy();
+        if (chatMode == MODE_FOLDER_FEED) {
+            FolderFeedController.getInstance(currentAccount).stop(classGuid);
+        }
         if (messageMetricsView != null) {
             messageMetricsView.finish();
         }
@@ -5628,7 +5647,7 @@ public class ChatActivity extends BaseFragment implements
             @Override
             public void draw(Canvas canvas) {
                 if ((startMessageAppearTransitionMs == 0 || System.currentTimeMillis() - startMessageAppearTransitionMs <= SKELETON_DISAPPEAR_MS) && !AndroidUtilities.isTablet() && !isComments && currentUser == null) {
-                    boolean noAvatar = (currentChat == null || ChatObject.isChannelAndNotMegaGroup(currentChat)) && chatMode != MODE_SEARCH;
+                    boolean noAvatar = (currentChat == null || ChatObject.isChannelAndNotMegaGroup(currentChat)) && chatMode != MODE_SEARCH && chatMode != MODE_FOLDER_FEED;
                     if (pullingDownOffset != 0) {
                         canvas.save();
                         canvas.translate(0, -pullingDownOffset);
@@ -14344,6 +14363,16 @@ public class ChatActivity extends BaseFragment implements
 
             return;
         }
+        if (chatMode == MODE_FOLDER_FEED) {
+            if (totalItemCount - firstVisibleItemFinal - visibleItemCountFinal <= checkLoadCount && !loading) {
+                if (!endReached[0] && !FolderFeedController.getInstance(currentAccount).isEndReached(classGuid)) {
+                    loading = true;
+                    waitingForLoad.add(lastLoadIndex);
+                    FolderFeedController.getInstance(currentAccount).loadMore(classGuid, lastLoadIndex++);
+                }
+            }
+            return;
+        }
 
         AndroidUtilities.runOnUIThread(() -> {
             if (totalItemCount - firstVisibleItemFinal - visibleItemCountFinal <= checkLoadCount && !loading) {
@@ -16932,8 +16961,10 @@ public class ChatActivity extends BaseFragment implements
                 loadingPinnedMessagesList = true;
             }
         }
-        getMessagesController().addToPollsQueue(dialog_id, pollsToCheck);
-        chatMessagesMetadataController.checkMessages(chatAdapter, maxAdapterPosition, minAdapterPosition, currentTime);
+        if (chatMode != MODE_FOLDER_FEED) {
+            getMessagesController().addToPollsQueue(dialog_id, pollsToCheck);
+            chatMessagesMetadataController.checkMessages(chatAdapter, maxAdapterPosition, minAdapterPosition, currentTime);
+        }
         if (videoPlayerContainer != null) {
             if (!foundTextureViewMessage) {
                 MessageObject messageObject = MediaController.getInstance().getPlayingMessageObject();
@@ -30709,7 +30740,7 @@ public class ChatActivity extends BaseFragment implements
         fixLayout();
         applyDraftMaybe(false);
         applyChatLinkMessageMaybe();
-        if (bottomChannelButtonsLayout != null && bottomChannelButtonsLayout.getVisibility() != View.VISIBLE && !actionBar.isSearchFieldVisible() && chatMode != MODE_SEARCH && !BaseFragment.hasSheets(this)) {
+        if (bottomChannelButtonsLayout != null && bottomChannelButtonsLayout.getVisibility() != View.VISIBLE && !actionBar.isSearchFieldVisible() && chatMode != MODE_SEARCH && chatMode != MODE_FOLDER_FEED && !BaseFragment.hasSheets(this)) {
             chatActivityEnterView.setFieldFocused(true);
         }
         if (chatActivityEnterView != null) {
@@ -37326,7 +37357,7 @@ public class ChatActivity extends BaseFragment implements
                     if (chatMode != MODE_SEARCH) {
                         finishFragment();
                     }
-                } else if (str.contains("@")) {
+                } else if (str.contains("@") || chatMode == MODE_FOLDER_FEED) {
                     presentFragment(new HashtagActivity(str, resourceProvider));
                 } else {
                     openHashtagSearch(str);
@@ -38585,7 +38616,7 @@ public class ChatActivity extends BaseFragment implements
                 if (view instanceof ChatMessageCell) {
                     final ChatMessageCell messageCell = (ChatMessageCell) view;
                     MessageObject.GroupedMessages groupedMessages = getValidGroupedMessage(message);
-                    messageCell.isChat = currentChat != null || UserObject.isUserSelf(currentUser) || UserObject.isReplyUser(currentUser) || (chatMode == MODE_SEARCH);
+                    messageCell.isChat = currentChat != null || UserObject.isUserSelf(currentUser) || UserObject.isReplyUser(currentUser) || (chatMode == MODE_SEARCH) || chatMode == MODE_FOLDER_FEED;
                     messageCell.setSponsoredMessageVisible(true, false);
                     messageCell.isBotForum = UserObject.isBotForum(currentUser);
                     messageCell.isReportChat = isReport();
@@ -38598,6 +38629,10 @@ public class ChatActivity extends BaseFragment implements
                     messageCell.isForumGeneral = ChatObject.isForum(currentChat) && isTopic && getTopicId() == 1;
                     messageCell.isThreadChat = (threadMessageId != 0 || messageCell.isForum && isTopic) && !messageCell.isMonoForum;
                     messageCell.hasDiscussion = chatMode != MODE_SCHEDULED && chatMode != MODE_WELCOME_MESSAGES && ChatObject.isChannel(currentChat) && currentChat.has_link && !currentChat.megagroup;
+                    if (chatMode == MODE_FOLDER_FEED) {
+                        TLRPC.Chat feedChannel = getMessagesController().getChat(-message.getDialogId());
+                        messageCell.hasDiscussion = feedChannel != null && feedChannel.has_link && !feedChannel.megagroup;
+                    }
                     messageCell.isPinned = chatMode == 0 && (pinnedMessageObjects.containsKey(message.getId()) || groupedMessages != null && !groupedMessages.messages.isEmpty() && pinnedMessageObjects.containsKey(groupedMessages.messages.get(0).getId()));
                     messageCell.linkedChatId = chatMode != MODE_SCHEDULED && chatMode != MODE_WELCOME_MESSAGES && chatInfo != null ? chatInfo.linked_chat_id : 0;
                     if (chatMode == MODE_SEARCH && searchType == SEARCH_MY_MESSAGES) {
@@ -38702,7 +38737,7 @@ public class ChatActivity extends BaseFragment implements
                                 } else {
                                     pinnedBottom = nextMessage.getSenderId() == message.getSenderId();
                                 }
-                            } else if (chatMode == MODE_SEARCH) {
+                            } else if (chatMode == MODE_SEARCH || chatMode == MODE_FOLDER_FEED) {
                                 pinnedBottom = MessageObject.getPeerId(message.messageOwner.peer_id) == MessageObject.getPeerId(nextMessage.messageOwner.peer_id);
                             }
                             if (DialogObject.getPeerDialogId(nextMessage.messageOwner.guestchat_via_from) != DialogObject.getPeerDialogId(message.messageOwner.guestchat_via_from)) {
@@ -38766,7 +38801,7 @@ public class ChatActivity extends BaseFragment implements
                                 } else {
                                     pinnedTop = prevMessage.getSenderId() == message.getSenderId();
                                 }
-                            } else if (chatMode == MODE_SEARCH) {
+                            } else if (chatMode == MODE_SEARCH || chatMode == MODE_FOLDER_FEED) {
                                 pinnedTop = MessageObject.getPeerId(message.messageOwner.peer_id) == MessageObject.getPeerId(prevMessage.messageOwner.peer_id);
                             }
                             if (DialogObject.getPeerDialogId(prevMessage.messageOwner.guestchat_via_from) != DialogObject.getPeerDialogId(message.messageOwner.guestchat_via_from)) {
@@ -40420,6 +40455,8 @@ public class ChatActivity extends BaseFragment implements
             if (chatMode == MODE_PINNED) {
                 chatActivityDelegate.openReplyMessage(messageObject.getId());
                 finishFragment();
+            } else if (chatMode == MODE_FOLDER_FEED) {
+                openMessageInOriginalDialog(messageObject);
             } else if (chatMode == MODE_SAVED || (chatMode == MODE_SEARCH && searchType == SEARCH_PUBLIC_POSTS) || (UserObject.isReplyUser(currentUser) || UserObject.isUserSelf(currentUser)) && messageObject.messageOwner.fwd_from != null && messageObject.messageOwner.fwd_from.saved_from_peer != null) {
                 if (UserObject.isReplyUser(currentUser) && messageObject.messageOwner.reply_to != null && messageObject.messageOwner.reply_to.reply_to_top_id != 0) {
                     openDiscussionMessageChat(messageObject.messageOwner.reply_to.reply_to_peer_id.channel_id, null, messageObject.messageOwner.reply_to.reply_to_top_id, 0, -1, messageObject.messageOwner.fwd_from.saved_from_msg_id, messageObject);
@@ -41393,6 +41430,13 @@ public class ChatActivity extends BaseFragment implements
 
         @Override
         public void didPressReaction(ChatMessageCell cell, TLRPC.ReactionCount reaction, boolean longpress, float x, float y) {
+            if (chatMode == MODE_FOLDER_FEED) {
+                // Reactions act on the message id, which is synthetic in the merged feed.
+                if (cell.getMessageObject() != null) {
+                    openMessageInOriginalDialog(cell.getMessageObject());
+                }
+                return;
+            }
             ChatActivity.this.didPressReaction(cell, reaction, longpress, x, y);
         }
 
@@ -41741,6 +41785,11 @@ public class ChatActivity extends BaseFragment implements
         public void didPressVoteButtons(ChatMessageCell cell, ArrayList<TLRPC.PollAnswer> buttons, int showCount, int x, int y) {
             final MessageObject message = cell.getMessageObject();
             if (message == null) {
+                return;
+            }
+            if (chatMode == MODE_FOLDER_FEED) {
+                // Votes act on the message id, which is synthetic in the merged feed.
+                openMessageInOriginalDialog(message);
                 return;
             }
 
@@ -43164,6 +43213,10 @@ public class ChatActivity extends BaseFragment implements
             } else {
                 maxReadId = -1;
                 linkedChatId = 0;
+            }
+            if (chatMode == MODE_FOLDER_FEED) {
+                openDiscussionMessageChat(-message.getDialogId(), message, message.getRealId(), linkedChatId, maxReadId, 0, null);
+                return;
             }
             openDiscussionMessageChat(currentChat.id, message, message.getId(), linkedChatId, maxReadId, 0, null);
         }
@@ -48768,7 +48821,40 @@ public class ChatActivity extends BaseFragment implements
     private void didReceivedNotificationCG(int id, int account, final Object... args) {
         if (id == NotificationCenter.cgUnreadCounterChanged) {
             updateIOSUnreadBadge();
+        } else if (id == NotificationCenter.cgFolderFeedLoaded) {
+            if ((Integer) args[0] != classGuid) {
+                return;
+            }
+            endReached[0] = (Boolean) args[1];
+            if (!endReached[0]) {
+                AndroidUtilities.runOnUIThread(() -> checkScrollForLoad(false));
+            }
+        } else if (id == NotificationCenter.cgFolderFeedNewPosts) {
+            if ((Integer) args[0] != classGuid || folderFeedHasNewPosts) {
+                return;
+            }
+            folderFeedHasNewPosts = true;
+            if (chatLayoutManager != null && chatLayoutManager.findFirstVisibleItemPosition() <= 1 && !loading) {
+                reloadFolderFeed();
+            } else {
+                BulletinFactory.of(this).createSimpleBulletin(R.raw.chats_infotip, getString(R.string.CG_FolderFeed_NewPosts), getString(R.string.CG_FolderFeed_Refresh), this::reloadFolderFeed).show();
+            }
         }
+    }
+
+    /** Reloads the merged folder feed from the newest posts. */
+    public void reloadFolderFeed() {
+        if (chatMode != MODE_FOLDER_FEED) {
+            return;
+        }
+        folderFeedHasNewPosts = false;
+        FolderFeedController.getInstance(currentAccount).stop(classGuid);
+        clearChatData(true);
+        startMessageAppearTransitionMs = 0;
+        firstMessagesLoaded = false;
+        loading = false;
+        waitingForLoad.clear();
+        firstLoadMessages();
     }
 
     private void processSelectedAttach(int which) {
@@ -48843,7 +48929,7 @@ public class ChatActivity extends BaseFragment implements
         return CherrygramChatsConfig.INSTANCE.getCenterChatTitle()
                 /*&& !(UserObject.isReplyUser(currentUser) || isComments)
                 && !isReplyChatComment()*/ && !isReport()
-                && getChatMode() != ChatActivity.MODE_SEARCH && getChatMode() != ChatActivity.MODE_SAVED && getChatMode() != ChatActivity.MODE_WELCOME_MESSAGES
+                && getChatMode() != ChatActivity.MODE_SEARCH && getChatMode() != ChatActivity.MODE_FOLDER_FEED && getChatMode() != ChatActivity.MODE_SAVED && getChatMode() != ChatActivity.MODE_WELCOME_MESSAGES
                 && getDialogId() != 0 && getDialogId() != UserConfig.getInstance(UserConfig.selectedAccount).getClientUserId();
     }
 
