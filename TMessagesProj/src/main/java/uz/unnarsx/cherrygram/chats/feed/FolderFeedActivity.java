@@ -145,6 +145,23 @@ public class FolderFeedActivity extends BaseFragment {
         }
     }
 
+    // ChatActivityContainer doesn't forward these; ChatActivity needs them e.g. to open comments.
+    @Override
+    public void onBecomeFullyVisible() {
+        super.onBecomeFullyVisible();
+        if (chatContainer != null && chatContainer.chatActivity != null && chatContainer.chatActivity.getFragmentView() != null) {
+            chatContainer.chatActivity.onBecomeFullyVisible();
+        }
+    }
+
+    @Override
+    public void onBecomeFullyHidden() {
+        super.onBecomeFullyHidden();
+        if (chatContainer != null && chatContainer.chatActivity != null && chatContainer.chatActivity.getFragmentView() != null) {
+            chatContainer.chatActivity.onBecomeFullyHidden();
+        }
+    }
+
     @Override
     public void onPause() {
         super.onPause();

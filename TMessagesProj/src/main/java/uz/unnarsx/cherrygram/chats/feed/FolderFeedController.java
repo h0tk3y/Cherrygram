@@ -58,6 +58,8 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
     private static final int PAGE_SIZE = 20;
     private static final int FETCH_LIMIT = 20;
     private static final int MAX_PARALLEL_REQUESTS = 3;
+    private static final int MAX_RETRIES = 3;
+    private static final long CHANNELS_CACHE_MS = 1000;
 
     private static final FolderFeedController[] Instance = new FolderFeedController[UserConfig.MAX_ACCOUNT_COUNT];
 
@@ -89,12 +91,39 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
         return CherrygramAppearanceConfig.INSTANCE.getFolderChannelsFeed();
     }
 
+    private static final Object channelsCacheLock = new Object();
+    private static int cachedAccount = -1;
+    private static MessagesController.DialogFilter cachedFilter;
+    private static int cachedDialogsCount = -1;
+    private static long cachedTime;
+    private static ArrayList<TLRPC.Chat> cachedChannels;
+
     /** Broadcast channels (not groups) that belong to the folder, in dialogs-list order. */
     public static ArrayList<TLRPC.Chat> getFeedChannels(int account, @Nullable MessagesController.DialogFilter filter) {
-        ArrayList<TLRPC.Chat> result = new ArrayList<>();
         if (filter == null || filter.isDefault()) {
-            return result;
+            return new ArrayList<>();
         }
+        // The dialogs list and its rows ask often while scrolling; a short-lived cache keeps this cheap.
+        int dialogsCount = MessagesController.getInstance(account).getAllDialogs().size();
+        long now = android.os.SystemClock.elapsedRealtime();
+        synchronized (channelsCacheLock) {
+            if (cachedChannels != null && cachedAccount == account && cachedFilter == filter && cachedDialogsCount == dialogsCount && now - cachedTime < CHANNELS_CACHE_MS) {
+                return new ArrayList<>(cachedChannels);
+            }
+        }
+        ArrayList<TLRPC.Chat> result = computeFeedChannels(account, filter);
+        synchronized (channelsCacheLock) {
+            cachedAccount = account;
+            cachedFilter = filter;
+            cachedDialogsCount = dialogsCount;
+            cachedTime = now;
+            cachedChannels = new ArrayList<>(result);
+        }
+        return result;
+    }
+
+    private static ArrayList<TLRPC.Chat> computeFeedChannels(int account, MessagesController.DialogFilter filter) {
+        ArrayList<TLRPC.Chat> result = new ArrayList<>();
         AccountInstance accountInstance = AccountInstance.getInstance(account);
         MessagesController controller = accountInstance.getMessagesController();
         ArrayList<TLRPC.Dialog> dialogs = new ArrayList<>(controller.getAllDialogs());
@@ -142,6 +171,7 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
         boolean exhausted;
         boolean inFlight;
         int reqId;
+        int retries;
         final ArrayList<TLRPC.Message> buffer = new ArrayList<>();
 
         Source(long dialogId, TLRPC.InputPeer peer, int frontier) {
@@ -376,7 +406,25 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
                 if (error != null) {
                     FileLog.e("FolderFeed: getHistory failed for " + source.dialogId + ": " + error.text);
                 }
-                // Do not retry in a loop: treat the channel as finished for this session.
+                if (source.retries < MAX_RETRIES) {
+                    // Transient failures (e.g. FLOOD_WAIT): retry the same page later instead of dropping the channel.
+                    source.retries++;
+                    int delay = 1000 * source.retries;
+                    if (error != null && error.text != null && error.text.startsWith("FLOOD_WAIT_")) {
+                        try {
+                            delay = Math.max(delay, Integer.parseInt(error.text.substring("FLOOD_WAIT_".length())) * 1000);
+                        } catch (NumberFormatException ignore) {
+                        }
+                    }
+                    source.inFlight = true;
+                    AndroidUtilities.runOnUIThread(() -> {
+                        source.inFlight = false;
+                        if (sessions.get(session.guid) == session) {
+                            process(session);
+                        }
+                    }, Math.min(delay, 30_000));
+                    return;
+                }
                 source.exhausted = true;
             }
             process(session);
@@ -404,26 +452,38 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
         session.loading = false;
         session.endReached = !hasMore;
         final int loadIndex = session.pendingLoadIndex;
-        NotificationCenter.getInstance(currentAccount).postNotificationName(NotificationCenter.messagesDidLoad,
-                0L, messageObjects.size(), messageObjects, false, 0, 0, 0, 0, 2, session.endReached,
-                session.guid, loadIndex, 0, 0, ChatActivity.MODE_FOLDER_FEED);
-        NotificationCenter.getInstance(currentAccount).postNotificationName(NotificationCenter.cgFolderFeedLoaded,
-                session.guid, session.endReached);
+        final boolean endReached = session.endReached;
+        // Always asynchronous, like regular history loads: loadMore() may be called from scroll callbacks.
+        AndroidUtilities.runOnUIThread(() -> {
+            if (sessions.get(session.guid) != session) {
+                return;
+            }
+            NotificationCenter.getInstance(currentAccount).postNotificationName(NotificationCenter.messagesDidLoad,
+                    0L, messageObjects.size(), messageObjects, false, 0, 0, 0, 0, 2, endReached,
+                    session.guid, loadIndex, 0, 0, ChatActivity.MODE_FOLDER_FEED);
+            NotificationCenter.getInstance(currentAccount).postNotificationName(NotificationCenter.cgFolderFeedLoaded,
+                    session.guid, endReached);
+        });
     }
 
     /**
      * Returns the list with every merged-feed message replaced by a copy that carries its real id,
      * for code that sends message ids to the server (e.g. forwarding). Other messages are kept.
      */
-    public static ArrayList<MessageObject> withRealIds(ArrayList<MessageObject> messages) {
-        boolean hasFeedMessages = false;
+    public static boolean hasFeedMessages(ArrayList<MessageObject> messages) {
+        if (messages == null) {
+            return false;
+        }
         for (MessageObject messageObject : messages) {
             if (messageObject != null && messageObject.isFolderFeedMessage) {
-                hasFeedMessages = true;
-                break;
+                return true;
             }
         }
-        if (!hasFeedMessages) {
+        return false;
+    }
+
+    public static ArrayList<MessageObject> withRealIds(ArrayList<MessageObject> messages) {
+        if (!hasFeedMessages(messages)) {
             return messages;
         }
         ArrayList<MessageObject> result = new ArrayList<>(messages.size());

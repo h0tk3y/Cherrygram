@@ -1971,7 +1971,7 @@ public class ChatActivity extends BaseFragment implements
         @Override
         public boolean hasDoubleTap(View view, int position) {
             if (isQuickRepliesOrWelcomeMessagesMode()) return false;
-            if (CherrygramMessagesConfig.INSTANCE.getDoubleTapAction() == CherrygramMessagesConfig.DOUBLE_TAP_ACTION_NONE || !(view instanceof ChatMessageCell)) {
+            if (CherrygramMessagesConfig.INSTANCE.getDoubleTapAction() == CherrygramMessagesConfig.DOUBLE_TAP_ACTION_NONE || !(view instanceof ChatMessageCell) || chatMode == MODE_FOLDER_FEED) {
                 return false;
             }
 
@@ -2060,7 +2060,7 @@ public class ChatActivity extends BaseFragment implements
 
         @Override
         public void onDoubleTap(View view, int position, float x, float y) {
-            if (CherrygramMessagesConfig.INSTANCE.getDoubleTapAction() == CherrygramMessagesConfig.DOUBLE_TAP_ACTION_NONE || getParentActivity() == null || isSecretChat() || isInScheduleMode() || isInPreviewMode() || isQuickRepliesOrWelcomeMessagesMode()) {
+            if (CherrygramMessagesConfig.INSTANCE.getDoubleTapAction() == CherrygramMessagesConfig.DOUBLE_TAP_ACTION_NONE || chatMode == MODE_FOLDER_FEED || getParentActivity() == null || isSecretChat() || isInScheduleMode() || isInPreviewMode() || isQuickRepliesOrWelcomeMessagesMode()) {
                 return;
             }
             MessageObject messageObject;
@@ -3626,7 +3626,9 @@ public class ChatActivity extends BaseFragment implements
 
         INavigationLayout parentLayout = getParentLayout();
         if (parentLayout != null && parentLayout.getFragmentStack() != null) {
-            BackButtonMenu.clearPulledDialogs(this, parentLayout.getFragmentStack().indexOf(this) - (replacingChatActivity ? 0 : 1));
+            if (!isInsideContainer) {
+                BackButtonMenu.clearPulledDialogs(this, parentLayout.getFragmentStack().indexOf(this) - (replacingChatActivity ? 0 : 1));
+            }
         }
         replacingChatActivity = false;
 
@@ -21742,7 +21744,22 @@ public class ChatActivity extends BaseFragment implements
         if (load_type == 1) {
             Collections.reverse(messArr);
         }
-        if (currentEncryptedChat == null && chatMode != MODE_QUICK_REPLIES) {
+        if (chatMode == MODE_FOLDER_FEED) {
+            // Replies must be resolved within each post's own channel, not across the merged list.
+            LongSparseArray<ArrayList<MessageObject>> feedRepliesByChannel = new LongSparseArray<>();
+            for (int feedIndex = 0; feedIndex < messArr.size(); feedIndex++) {
+                MessageObject feedReplyOwner = messArr.get(feedIndex);
+                ArrayList<MessageObject> feedReplyList = feedRepliesByChannel.get(feedReplyOwner.getDialogId());
+                if (feedReplyList == null) {
+                    feedReplyList = new ArrayList<>();
+                    feedRepliesByChannel.put(feedReplyOwner.getDialogId(), feedReplyList);
+                }
+                feedReplyList.add(feedReplyOwner);
+            }
+            for (int feedIndex = 0; feedIndex < feedRepliesByChannel.size(); feedIndex++) {
+                getMediaDataController().loadReplyMessagesForMessages(feedRepliesByChannel.valueAt(feedIndex), feedRepliesByChannel.keyAt(feedIndex), MODE_DEFAULT, 0, null, classGuid, null);
+            }
+        } else if (currentEncryptedChat == null && chatMode != MODE_QUICK_REPLIES) {
             getMediaDataController().loadReplyMessagesForMessages(messArr, dialog_id, chatMode, 0, null, classGuid, null);
         }
         int approximateHeightSum = 0;
@@ -24157,7 +24174,7 @@ public class ChatActivity extends BaseFragment implements
             }
         } else if (id == NotificationCenter.replyMessagesDidLoad) {
             long did = (Long) args[0];
-            if (did == dialog_id) {
+            if (did == dialog_id || chatMode == MODE_FOLDER_FEED && did != 0) {
                 ArrayList<MessageObject> loadedMessages = (ArrayList<MessageObject>) args[1];
                 LongSparseArray<SparseArray<ArrayList<MessageObject>>> replyMessageOwners = (LongSparseArray<SparseArray<ArrayList<MessageObject>>>) args[2];
                 for (int a = 0, N = loadedMessages.size(); a < N; a++) {
@@ -31890,7 +31907,7 @@ public class ChatActivity extends BaseFragment implements
             final boolean isEphemeral = message != null && message.isEphemeral();
             final boolean isReactionsViewAvailable = !isEphemeral && !suggestEdit && !isSecretChat() && !isInScheduleMode() && currentUser == null && primaryMessage.hasReactions() && (!ChatObject.isChannel(currentChat) || currentChat.megagroup) && !ChatObject.isMonoForum(currentChat) && !availableReacts.isEmpty() && primaryMessage.messageOwner.reactions.can_see_list && !primaryMessage.isSecretMedia();
             final boolean isReactionsAvailable;
-            if (suggestEdit || isEphemeral) {
+            if (suggestEdit || isEphemeral || chatMode == MODE_FOLDER_FEED) {
                 isReactionsAvailable = false;
             } else if (message.isForwardedChannelPost()) {
                 TLRPC.ChatFull chatInfo = getMessagesController().getChatFull(-message.getFromChatId());
@@ -32853,7 +32870,7 @@ public class ChatActivity extends BaseFragment implements
                             didPressMessageUrl(link, false, selectedObject, v instanceof ChatMessageCell ? (ChatMessageCell) v : null);
                             return true;
                         };
-                        TLRPC.InputPeer inputPeer = selectedObject != null && (selectedObject.isPoll() || selectedObject.isVoiceTranscriptionOpen() || selectedObject.isSponsored() || selectedObject.scheduled || chatMode == MODE_QUICK_REPLIES) ? null : getMessagesController().getInputPeer(dialog_id);
+                        TLRPC.InputPeer inputPeer = selectedObject != null && (selectedObject.isPoll() || selectedObject.isVoiceTranscriptionOpen() || selectedObject.isSponsored() || selectedObject.scheduled || chatMode == MODE_QUICK_REPLIES || chatMode == MODE_FOLDER_FEED) ? null : getMessagesController().getInputPeer(dialog_id);
 //                        final boolean shouldTranslateByText = selectedObject != null && (selectedObject.isPoll() || selectedObject.isVoiceTranscriptionOpen() || selectedObject.isSponsored() || selectedObject.scheduled || chatMode == MODE_QUICK_REPLIES);
                         final TL_iv.RichMessage richMessageToTranslate = selectedObject != null && selectedObject.type == MessageObject.TYPE_ARTICLE && selectedObject.messageOwner != null ? selectedObject.messageOwner.rich_message : null;
                         if (richMessageToTranslate != null) {
@@ -42153,6 +42170,23 @@ public class ChatActivity extends BaseFragment implements
             }
             MessageObject messageObject = cell.getMessageObject();
             if (messageObject == null) return;
+            if (chatMode == MODE_FOLDER_FEED && !messageObject.isReplyToStory()) {
+                // Replies point into the post's own channel, which the merged feed does not hold by real id.
+                TLRPC.MessageReplyHeader replyTo = messageObject.messageOwner.reply_to;
+                long replyDialogId = replyTo != null && replyTo.reply_to_peer_id != null ? DialogObject.getPeerDialogId(replyTo.reply_to_peer_id) : messageObject.getDialogId();
+                Bundle args = new Bundle();
+                if (replyDialogId < 0) {
+                    args.putLong("chat_id", -replyDialogId);
+                } else {
+                    args.putLong("user_id", replyDialogId);
+                }
+                args.putInt("message_id", id);
+                args.putBoolean("need_remove_previous_same_chat_activity", false);
+                if (getMessagesController().checkCanOpenChat(args, ChatActivity.this)) {
+                    presentFragment(new ChatActivity(args));
+                }
+                return;
+            }
             if (messageObject.isReplyToStory() && messageObject.messageOwner.replyStory != null) {
                 if (messageObject.messageOwner.replyStory instanceof TL_stories.TL_storyItemDeleted) {
                     BulletinFactory.of(ChatActivity.this).createSimpleBulletin(R.raw.story_bomb1, LocaleController.getString(R.string.StoryNotFound)).show();
@@ -47271,7 +47305,7 @@ public class ChatActivity extends BaseFragment implements
                     options.add(OPTION_TRANSLATE);
                     icons.add(R.drawable.msg_translate);
                 }
-                if (message.canEditMessage(currentChat) && message.type != MessageObject.TYPE_POLL || chatMode == MODE_WELCOME_MESSAGES) {
+                if (message.canEditMessage(currentChat) && message.type != MessageObject.TYPE_POLL && chatMode != MODE_FOLDER_FEED || chatMode == MODE_WELCOME_MESSAGES) {
                     allowEdit = true;
                     items.add(LocaleController.getString(R.string.Edit));
                     options.add(OPTION_EDIT);
@@ -47313,7 +47347,7 @@ public class ChatActivity extends BaseFragment implements
                     icons.add(R.drawable.menu_gift);
                 }
             }
-            if (message.canDeleteMessage(chatMode == MODE_SCHEDULED, currentChat) && (threadMessageObjects == null || !threadMessageObjects.contains(message)) && !(message != null && message.messageOwner != null && message.messageOwner.action instanceof TLRPC.TL_messageActionTopicCreate)) {
+            if (chatMode != MODE_FOLDER_FEED && message.canDeleteMessage(chatMode == MODE_SCHEDULED, currentChat) && (threadMessageObjects == null || !threadMessageObjects.contains(message)) && !(message != null && message.messageOwner != null && message.messageOwner.action instanceof TLRPC.TL_messageActionTopicCreate)) {
                 allowDelete = true;
 
                 items.add(LocaleController.getString(chatMode == MODE_SAVED && threadMessageId != getUserConfig().getClientUserId() ? R.string.Remove : R.string.Delete));
@@ -47668,7 +47702,7 @@ public class ChatActivity extends BaseFragment implements
                     options.add(OPTION_TRANSLATE);
                     icons.add(R.drawable.msg_translate);
                 }
-                if (allowEdit || chatMode == MODE_WELCOME_MESSAGES) {
+                if (allowEdit && chatMode != MODE_FOLDER_FEED || chatMode == MODE_WELCOME_MESSAGES) {
                     items.add(LocaleController.getString(R.string.Edit));
                     options.add(OPTION_EDIT);
                     icons.add(R.drawable.msg_edit);
@@ -47700,7 +47734,7 @@ public class ChatActivity extends BaseFragment implements
                         icons.add(R.drawable.msg_report);
                     }
                 }
-                if (message.canDeleteMessage(chatMode == MODE_SCHEDULED, currentChat) && (threadMessageObjects == null || !threadMessageObjects.contains(message))) {
+                if (chatMode != MODE_FOLDER_FEED && message.canDeleteMessage(chatMode == MODE_SCHEDULED, currentChat) && (threadMessageObjects == null || !threadMessageObjects.contains(message))) {
                     allowDelete = true;
 
                     items.add(LocaleController.getString(chatMode == MODE_SAVED && threadMessageId != getUserConfig().getClientUserId() ? R.string.Remove : R.string.Delete));
@@ -48836,11 +48870,16 @@ public class ChatActivity extends BaseFragment implements
                 return;
             }
             folderFeedHasNewPosts = true;
-            if (chatLayoutManager != null && chatLayoutManager.findFirstVisibleItemPosition() <= 1 && !loading) {
-                reloadFolderFeed();
-            } else {
-                BulletinFactory.of(this).createSimpleBulletin(R.raw.chats_infotip, getString(R.string.CG_FolderFeed_NewPosts), getString(R.string.CG_FolderFeed_Refresh), this::reloadFolderFeed).show();
-            }
+            // Deferred: the dialog's last message date is updated after didReceiveNewMessages is posted.
+            AndroidUtilities.runOnUIThread(() -> {
+                if (chatLayoutManager != null && chatLayoutManager.findFirstVisibleItemPosition() <= 1 && !loading) {
+                    reloadFolderFeed();
+                } else {
+                    Bulletin bulletin = BulletinFactory.of(this).createSimpleBulletin(R.raw.chats_infotip, getString(R.string.CG_FolderFeed_NewPosts), getString(R.string.CG_FolderFeed_Refresh), this::reloadFolderFeed);
+                    bulletin.setOnHideListener(() -> folderFeedHasNewPosts = false);
+                    bulletin.show();
+                }
+            });
         }
     }
 
