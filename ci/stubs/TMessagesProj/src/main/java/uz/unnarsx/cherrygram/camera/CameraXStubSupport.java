@@ -11,6 +11,8 @@
 
 package uz.unnarsx.cherrygram.camera;
 
+import org.telegram.messenger.ApplicationLoader;
+
 import uz.unnarsx.cherrygram.core.configs.CherrygramCameraConfig;
 
 public final class CameraXStubSupport {
@@ -25,12 +27,16 @@ public final class CameraXStubSupport {
 
     /** Switches the "CameraX" camera type back to the stock Telegram camera. Safe to call often. */
     public static void ensureCameraXDisabled() {
+        if (ApplicationLoader.applicationContext == null) {
+            // CherrygramCameraConfig needs the context in its initializer; never initialize it early.
+            return;
+        }
         try {
             if (CherrygramCameraConfig.INSTANCE.getCameraType() == CherrygramCameraConfig.CAMERA_X) {
                 CherrygramCameraConfig.INSTANCE.setCameraType(CherrygramCameraConfig.TELEGRAM_CAMERA);
             }
         } catch (Throwable ignore) {
-            // Config not ready yet (no application context): nothing to do.
+            // Never let the guard break the caller.
         }
     }
 }
