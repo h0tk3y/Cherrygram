@@ -20,8 +20,8 @@ import sys
 import zlib
 
 from telethon import TelegramClient, functions, types
-from telethon.errors import (PhoneNumberBannedError, PhoneNumberInvalidError,
-                             SessionPasswordNeededError, FloodWaitError)
+from telethon.errors import (PhoneNumberBannedError, PhoneNumberInvalidError, PhoneNumberUnoccupiedError,
+                             PhoneCodeInvalidError, SessionPasswordNeededError, FloodWaitError)
 from telethon.sessions import StringSession
 
 TEST_DC_ID = 2
@@ -62,12 +62,32 @@ async def sign_in(out):
         client = make_client()
         await client.connect()
         try:
-            await client.start(phone=phone, code_callback=lambda: str(TEST_DC_ID) * 5,
-                               first_name="Feed", last_name="Tester")
+            sent = await client.send_code_request(phone)
+            # Test-server login codes are the DC id repeated; the length is whatever the server asks for.
+            length = getattr(sent.type, "length", None) or 5
+            print(f"{phone}: code sent ({type(sent.type).__name__}, length {length})")
+            signed_in = False
+            for code_length in dict.fromkeys([length, 5, 6]):
+                code = str(TEST_DC_ID) * code_length
+                try:
+                    try:
+                        await client.sign_in(phone=phone, code=code, phone_code_hash=sent.phone_code_hash)
+                    except PhoneNumberUnoccupiedError:
+                        await client.sign_up(code=code, first_name="Feed", last_name="Tester",
+                                             phone=phone, phone_code_hash=sent.phone_code_hash)
+                    signed_in = True
+                    break
+                except PhoneCodeInvalidError:
+                    print(f"{phone}: code {code} rejected")
+            if not signed_in:
+                await client.disconnect()
+                continue
             me = await client.get_me()
             print(f"signed in as {me.id} with {phone}")
             with open(os.path.join(out, "phone.txt"), "w") as f:
                 f.write(phone)
+            with open(os.path.join(out, "code.txt"), "w") as f:
+                f.write(code)
             with open(os.path.join(out, "session.txt"), "w") as f:
                 f.write(client.session.save())
             return client

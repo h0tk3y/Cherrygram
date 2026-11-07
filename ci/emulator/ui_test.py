@@ -25,7 +25,7 @@ counter = [0]
 
 
 def adb(*args, check=False, capture=True, timeout=120):
-    result = subprocess.run(["adb", *args], capture_output=capture, text=True, timeout=timeout)
+    result = subprocess.run(["adb", *args], capture_output=capture, text=True, errors="replace", timeout=timeout)
     if check and result.returncode != 0:
         raise RuntimeError(f"adb {' '.join(args)} failed: {result.stderr}")
     return result.stdout if capture else ""
@@ -165,8 +165,11 @@ def main():
     shell("logcat -c")
     width, height = screen_size()
     phone = None
+    code = None
     if args.account and os.path.exists(os.path.join(args.account, "phone.txt")):
         phone = open(os.path.join(args.account, "phone.txt")).read().strip()
+        code_file = os.path.join(args.account, "code.txt")
+        code = open(code_file).read().strip() if os.path.exists(code_file) else str(phone[5]) * 5
 
     step("prefs_enable_feature", lambda: (write_prefs(), "feature enabled, entry points: both"))
 
@@ -216,7 +219,7 @@ def main():
     def enter_code():
         time.sleep(4)
         dismiss_system_dialogs()
-        shell("input text " + str(phone[5]) * 5)
+        shell("input text " + code)
         node = wait_for(["Feeds", "Chats", "Cherrygram", "Search"], timeout=60)
         return node is not None, "logged in" if node is not None else "main screen not detected"
     step("logged_in", enter_code)
