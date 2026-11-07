@@ -64,7 +64,12 @@ jobs:
             ccache-${{ hashFiles('TMessagesProj/jni/CMakeLists.txt', 'ci/native-stubs/**', 'ci/prepare-build.py') }}-
             ccache-
 
+      # The repository's gradle-wrapper.jar does not match any official Gradle release checksum, so
+      # it is not executed: install the official Gradle version it pins and run `gradle` instead.
       - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.13'
+          validate-wrappers: false
 
       - name: Prepare sources (stubs, signing, ABIs)
         env:
@@ -80,7 +85,7 @@ jobs:
           CCACHE_COMPILERCHECK: content
         run: |
           ccache -z || true
-          ./gradlew :TMessagesProj_App:assembleAfatDebug -PAPP_PACKAGE=$APP_PACKAGE --stacktrace --no-daemon
+          gradle :TMessagesProj_App:assembleAfatDebug -PAPP_PACKAGE=$APP_PACKAGE --stacktrace --no-daemon
           ccache -s || true
 
       - name: Collect APK
