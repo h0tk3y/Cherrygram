@@ -56,7 +56,7 @@ jobs:
           sudo apt-get update -qq && sudo apt-get install -y -qq ccache
 
       - name: Restore ccache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: ~/.cache/ccache
           key: ccache-${{ hashFiles('TMessagesProj/jni/CMakeLists.txt', 'ci/native-stubs/**', 'ci/prepare-build.py') }}-${{ github.sha }}
@@ -87,6 +87,14 @@ jobs:
           ccache -z || true
           gradle :TMessagesProj_App:assembleAfatDebug -PAPP_PACKAGE=$APP_PACKAGE --stacktrace --no-daemon
           ccache -s || true
+
+      # Saved even when a later (Java/Kotlin) step fails, so the slow native build is reused.
+      - name: Save ccache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/ccache
+          key: ccache-${{ hashFiles('TMessagesProj/jni/CMakeLists.txt', 'ci/native-stubs/**', 'ci/prepare-build.py') }}-${{ github.sha }}
 
       - name: Collect APK
         id: apk
