@@ -59,6 +59,9 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
     private static final int FETCH_LIMIT = 20;
     private static final int MAX_PARALLEL_REQUESTS = 3;
     private static final int MAX_RETRIES = 3;
+    /** The first load continues past one page to reach the oldest unread post, up to this many posts. */
+    private static final int FIRST_LOAD_CAP = 300;
+    private static final int MAX_FETCH_LIMIT = 100;
     private static final long CHANNELS_CACHE_MS = 1000;
 
     private static final FolderFeedController[] Instance = new FolderFeedController[UserConfig.MAX_ACCOUNT_COUNT];
@@ -172,6 +175,9 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
         boolean inFlight;
         int reqId;
         int retries;
+        /** Read pointer and unread count when the feed was opened (posts with id > readMax are unread). */
+        int readMax;
+        int unreadCount;
         final ArrayList<TLRPC.Message> buffer = new ArrayList<>();
 
         Source(long dialogId, TLRPC.InputPeer peer, int frontier) {
@@ -187,6 +193,8 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
         final ArrayList<Source> sources = new ArrayList<>();
         final HashSet<Long> dialogIds = new HashSet<>();
         int nextGeneratedId = Integer.MAX_VALUE - 1;
+        /** The first load opens the feed at the oldest unread post, like a channel opens at its first unread. */
+        boolean firstLoad = true;
         boolean loading;
         boolean endReached;
         int pendingLoadIndex;
@@ -211,7 +219,13 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
             }
             TLRPC.Dialog dialog = controller.dialogs_dict.get(dialogId);
             int frontier = dialog != null && dialog.last_message_date > 0 ? dialog.last_message_date : Integer.MAX_VALUE;
-            session.sources.add(new Source(dialogId, peer, frontier));
+            Source source = new Source(dialogId, peer, frontier);
+            if (dialog != null) {
+                Integer localReadMax = controller.dialogs_read_inbox_max.get(dialogId);
+                source.readMax = Math.max(dialog.read_inbox_max_id, localReadMax != null ? localReadMax : 0);
+                source.unreadCount = dialog.unread_count;
+            }
+            session.sources.add(source);
             session.dialogIds.add(dialogId);
         }
         sessions.put(guid, session);
@@ -264,7 +278,12 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
             return;
         }
         ArrayList<TLRPC.Message> ready = collectReady(session);
-        if (ready.size() >= PAGE_SIZE || noMoreToFetch(session)) {
+        boolean pageReady = ready.size() >= PAGE_SIZE;
+        if (pageReady && session.firstLoad && ready.size() < FIRST_LOAD_CAP && !oldestUnreadReady(session)) {
+            // Keep loading so the feed can open at the oldest unread post.
+            pageReady = false;
+        }
+        if (pageReady || noMoreToFetch(session)) {
             emit(session, ready);
             return;
         }
@@ -288,6 +307,28 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
         if (inFlight == 0) {
             emit(session, collectReady(session));
         }
+    }
+
+    /**
+     * Whether every unread post (as of opening the feed) has been fetched and is ready to be shown,
+     * i.e. no channel with unread posts still has unfetched or watermark-held unread posts.
+     * Call after {@link #collectReady}, which removes the ready posts from the buffers.
+     */
+    private boolean oldestUnreadReady(Session session) {
+        for (Source source : session.sources) {
+            if (source.unreadCount <= 0) {
+                continue;
+            }
+            if (!source.exhausted && (source.offsetId == 0 || source.offsetId > source.readMax + 1)) {
+                return false;
+            }
+            for (TLRPC.Message message : source.buffer) {
+                if (message.id > source.readMax) {
+                    return false;
+                }
+            }
+        }
+        return true;
     }
 
     private boolean noMoreToFetch(Session session) {
@@ -346,6 +387,15 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
         }
     }
 
+    private static Source findSource(Session session, long dialogId) {
+        for (Source source : session.sources) {
+            if (source.dialogId == dialogId) {
+                return source;
+            }
+        }
+        return null;
+    }
+
     private static void sortNewestFirst(ArrayList<TLRPC.Message> messages) {
         Collections.sort(messages, (a, b) -> {
             if (a.date != b.date) {
@@ -363,7 +413,8 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
         TLRPC.TL_messages_getHistory req = new TLRPC.TL_messages_getHistory();
         req.peer = source.peer;
         req.offset_id = source.offsetId;
-        req.limit = FETCH_LIMIT;
+        final int limit = session.firstLoad && source.unreadCount >= FETCH_LIMIT ? Math.min(MAX_FETCH_LIMIT, source.unreadCount + 1) : FETCH_LIMIT;
+        req.limit = limit;
         source.inFlight = true;
         source.reqId = ConnectionsManager.getInstance(currentAccount).sendRequest(req, (response, error) -> AndroidUtilities.runOnUIThread(() -> {
             source.inFlight = false;
@@ -397,7 +448,7 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
                     } else {
                         source.offsetId = oldest.id;
                         source.frontier = oldest.date;
-                        if (res.messages.size() < FETCH_LIMIT) {
+                        if (res.messages.size() < limit) {
                             source.exhausted = true;
                         }
                     }
@@ -433,7 +484,12 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
 
     private void emit(Session session, ArrayList<TLRPC.Message> ready) {
         ArrayList<MessageObject> messageObjects = new ArrayList<>(ready.size());
-        MessagesController controller = MessagesController.getInstance(currentAccount);
+        // On the first page, find the oldest unread post: ChatActivity scrolls there and shows the
+        // "Unread messages" separator, exactly as for a channel's first unread message.
+        int firstUnreadId = 0;
+        int unreadCount = 0;
+        final boolean firstLoad = session.firstLoad;
+        session.firstLoad = false;
         for (TLRPC.Message message : ready) {
             // SEARCH_PUBLIC_POSTS makes the cell draw the channel avatar and the "go to post" side button.
             MessageObject messageObject = new MessageObject(currentAccount, message, null, null, null, null, null, true, true, 0, false, false, false, ChatActivity.SEARCH_PUBLIC_POSTS);
@@ -441,6 +497,13 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
             message.realId = message.id;
             message.id = session.nextGeneratedId--;
             messageObjects.add(messageObject);
+            if (firstLoad) {
+                Source source = findSource(session, MessageObject.getDialogId(message));
+                if (source != null && source.unreadCount > 0 && message.realId > source.readMax) {
+                    firstUnreadId = message.id;
+                    unreadCount++;
+                }
+            }
         }
         boolean hasMore = false;
         for (Source source : session.sources) {
@@ -453,13 +516,15 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
         session.endReached = !hasMore;
         final int loadIndex = session.pendingLoadIndex;
         final boolean endReached = session.endReached;
+        final int fnid = firstUnreadId;
+        final int unreadToLoad = unreadCount;
         // Always asynchronous, like regular history loads: loadMore() may be called from scroll callbacks.
         AndroidUtilities.runOnUIThread(() -> {
             if (sessions.get(session.guid) != session) {
                 return;
             }
             NotificationCenter.getInstance(currentAccount).postNotificationName(NotificationCenter.messagesDidLoad,
-                    0L, messageObjects.size(), messageObjects, false, 0, 0, 0, 0, 2, endReached,
+                    0L, messageObjects.size(), messageObjects, false, fnid, 0, unreadToLoad, 0, 2, endReached,
                     session.guid, loadIndex, 0, 0, ChatActivity.MODE_FOLDER_FEED);
             NotificationCenter.getInstance(currentAccount).postNotificationName(NotificationCenter.cgFolderFeedLoaded,
                     session.guid, endReached);

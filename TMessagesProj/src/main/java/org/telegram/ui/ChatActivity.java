@@ -48925,6 +48925,7 @@ public class ChatActivity extends BaseFragment implements
                 maxVisibleDates.put(did, messageObject.messageOwner.date);
             }
         }
+        boolean markedAny = false;
         for (int i = 0, n = maxVisibleIds.size(); i < n; i++) {
             long did = maxVisibleIds.keyAt(i);
             int maxId = maxVisibleIds.valueAt(i);
@@ -48946,6 +48947,27 @@ public class ChatActivity extends BaseFragment implements
             folderFeedReadMax.put(did, maxId);
             // countDiff 0 would reset the unread counter completely, so always decrement by at least one.
             getMessagesController().markDialogAsRead(did, maxId, maxId, maxVisibleDates.get(did, 0), false, 0, Math.max(1, newlyRead), false, 0);
+            markedAny = true;
+        }
+        if (markedAny && newUnreadMessageCount > 0 && !folderFeedHasNewPosts && sideControlsButtonsLayout != null) {
+            // Count the loaded posts that are still unread, for the jump-to-bottom button's counter.
+            int remaining = 0;
+            for (int a = 0, size = messages.size(); a < size; a++) {
+                MessageObject messageObject = messages.get(a);
+                if (!messageObject.isFolderFeedMessage) {
+                    continue;
+                }
+                long did = messageObject.getDialogId();
+                TLRPC.Dialog dialog = getMessagesController().dialogs_dict.get(did);
+                int readMax = Math.max(dialog != null ? dialog.read_inbox_max_id : 0, folderFeedReadMax.get(did, 0));
+                if (messageObject.getRealId() > readMax) {
+                    remaining++;
+                }
+            }
+            if (remaining != newUnreadMessageCount) {
+                newUnreadMessageCount = remaining;
+                sideControlsButtonsLayout.setButtonCount(ChatActivitySideControlsButtonsLayout.BUTTON_PAGE_DOWN, remaining, true);
+            }
         }
     }
 
