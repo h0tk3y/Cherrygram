@@ -180,7 +180,7 @@ def main():
     step("launch", launch)
 
     if not phone:
-        steps.append(("login", False, "no test account (TG_APP_ID/TG_APP_HASH secrets missing): smoke test only", "", 0))
+        steps.append(("login", False, "no test account (see the 'Prepare test-server account' step: secrets missing or test-server sign-in failed): smoke test only", "", 0))
         finish()
         return
 

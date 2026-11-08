@@ -26,6 +26,7 @@ import org.telegram.ui.ActionBar.ActionBar;
 import org.telegram.ui.ActionBar.ActionBarMenu;
 import org.telegram.ui.ActionBar.AlertDialog;
 import org.telegram.ui.ActionBar.BaseFragment;
+import org.telegram.ui.ActionBar.INavigationLayout;
 import org.telegram.ui.ActionBar.Theme;
 import org.telegram.ui.ChatActivity;
 import org.telegram.ui.ChatActivityContainer;
@@ -54,7 +55,9 @@ public class FolderFeedActivity extends BaseFragment {
         if (parent == null || filter == null || !FolderFeedController.isAvailableForFilter(parent.getCurrentAccount(), filter)) {
             return false;
         }
-        parent.presentFragment(new FolderFeedActivity(filter.id));
+        // On tablets, open in the right-hand chat pane like a regular chat instead of the floating
+        // "layers" popup used for non-chat screens. No effect on phones.
+        parent.presentFragment(new INavigationLayout.NavigationParams(new FolderFeedActivity(filter.id)).forceRightLayout());
         return true;
     }
 
