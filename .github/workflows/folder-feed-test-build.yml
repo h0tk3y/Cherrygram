@@ -118,7 +118,9 @@ jobs:
         run: |
           ccache -z || true
           gradle --version
-          gradle :TMessagesProj_App:assembleAfatDebug -PAPP_PACKAGE=$APP_PACKAGE --stacktrace --no-daemon --refresh-dependencies
+          # Google's mirror of Maven Central first: Maven Central redirected Kotlin compiler jars to
+          # GitHub release downloads, which fail from runners (HTTP 502/504).
+          gradle --init-script ci/gradle-mirror.init.gradle :TMessagesProj_App:assembleAfatDebug -PAPP_PACKAGE=$APP_PACKAGE --stacktrace --no-daemon --refresh-dependencies
           ccache -s || true
 
       # Saved even when a later (Java/Kotlin) step fails, so the slow native build is reused.
