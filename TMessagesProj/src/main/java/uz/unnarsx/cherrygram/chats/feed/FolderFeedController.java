@@ -526,14 +526,15 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
         final int loadIndex = session.pendingLoadIndex;
         final boolean endReached = session.endReached;
         final int fnid = firstUnreadId;
-        final int unreadToLoad = unreadCount;
         // Always asynchronous, like regular history loads: loadMore() may be called from scroll callbacks.
         AndroidUtilities.runOnUIThread(() -> {
             if (sessions.get(session.guid) != session) {
                 return;
             }
             NotificationCenter.getInstance(currentAccount).postNotificationName(NotificationCenter.messagesDidLoad,
-                    0L, messageObjects.size(), messageObjects, false, fnid, 0, unreadToLoad, 0, 2, endReached,
+                    // The unread count is not passed (args[6] = 0): the feed shows it on its own
+                    // "next unread" button, while jump-to-bottom stays a plain jump to the newest post.
+                    0L, messageObjects.size(), messageObjects, false, fnid, 0, 0, 0, 2, endReached,
                     session.guid, loadIndex, 0, 0, ChatActivity.MODE_FOLDER_FEED);
             NotificationCenter.getInstance(currentAccount).postNotificationName(NotificationCenter.cgFolderFeedLoaded,
                     session.guid, endReached);

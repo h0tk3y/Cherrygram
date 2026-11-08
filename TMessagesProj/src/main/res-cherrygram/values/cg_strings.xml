@@ -306,6 +306,7 @@
     <string name="CG_FolderFeed_NewPosts">New posts in the feed</string>
     <string name="CG_FolderFeed_Refresh">Show</string>
     <string name="CG_FolderFeed_OpenInChannel">Open in channel</string>
+    <string name="CG_FolderFeed_NextUnread">Next unread post</string>
     <string name="CG_FolderFeed_ChannelsCount_one">%1$d channel</string>
     <string name="CG_FolderFeed_ChannelsCount_other">%1$d channels</string>
     <string name="CP_NewTabs_RemoveAllChats">Hide \"All chats\" tab</string>

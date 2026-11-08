@@ -719,6 +719,7 @@ public class ChatActivity extends BaseFragment implements
     public int folderFeedFilterId;
     private boolean folderFeedHasNewPosts;
     private int folderFeedNewPostsCount;
+    private int folderFeedUnreadCount;
 
     public static final int SEARCH_THIS_CHAT = 0;
     public static final int SEARCH_MY_MESSAGES = 1;
@@ -48300,6 +48301,10 @@ public class ChatActivity extends BaseFragment implements
     }
 
     private void onSideControlButtonOnClick(int buttonId, View v) {
+        if (buttonId == ChatActivitySideControlsButtonsLayout.BUTTON_FEED_NEXT_UNREAD) {
+            scrollToNextFolderFeedUnread();
+            return;
+        }
         if (buttonId == ChatActivitySideControlsButtonsLayout.BUTTON_PAGE_DOWN) {
             onPageDownClicked(false);
         } else if (buttonId == ChatActivitySideControlsButtonsLayout.BUTTON_MENTION) {
@@ -48872,6 +48877,7 @@ public class ChatActivity extends BaseFragment implements
                 return;
             }
             endReached[0] = (Boolean) args[1];
+            updateFolderFeedUnreadButton(true);
             if (!endReached[0]) {
                 AndroidUtilities.runOnUIThread(() -> checkScrollForLoad(false));
             }
@@ -48949,26 +48955,74 @@ public class ChatActivity extends BaseFragment implements
             getMessagesController().markDialogAsRead(did, maxId, maxId, maxVisibleDates.get(did, 0), false, 0, Math.max(1, newlyRead), false, 0);
             markedAny = true;
         }
-        if (markedAny && newUnreadMessageCount > 0 && !folderFeedHasNewPosts && sideControlsButtonsLayout != null) {
-            // Count the loaded posts that are still unread, for the jump-to-bottom button's counter.
-            int remaining = 0;
-            for (int a = 0, size = messages.size(); a < size; a++) {
-                MessageObject messageObject = messages.get(a);
-                if (!messageObject.isFolderFeedMessage) {
-                    continue;
-                }
-                long did = messageObject.getDialogId();
-                TLRPC.Dialog dialog = getMessagesController().dialogs_dict.get(did);
-                int readMax = Math.max(dialog != null ? dialog.read_inbox_max_id : 0, folderFeedReadMax.get(did, 0));
-                if (messageObject.getRealId() > readMax) {
-                    remaining++;
-                }
-            }
-            if (remaining != newUnreadMessageCount) {
-                newUnreadMessageCount = remaining;
-                sideControlsButtonsLayout.setButtonCount(ChatActivitySideControlsButtonsLayout.BUTTON_PAGE_DOWN, remaining, true);
+        if (markedAny) {
+            updateFolderFeedUnreadButton(true);
+        }
+    }
+
+    private boolean isFolderFeedUnread(MessageObject messageObject) {
+        if (messageObject == null || !messageObject.isFolderFeedMessage) {
+            return false;
+        }
+        long did = messageObject.getDialogId();
+        TLRPC.Dialog dialog = getMessagesController().dialogs_dict.get(did);
+        int readMax = Math.max(dialog != null ? dialog.read_inbox_max_id : 0, folderFeedReadMax.get(did, 0));
+        return messageObject.getRealId() > readMax;
+    }
+
+    /** Shows the "next unread post" button with the number of loaded posts that are still unread. */
+    private void updateFolderFeedUnreadButton(boolean animated) {
+        if (chatMode != MODE_FOLDER_FEED || sideControlsButtonsLayout == null) {
+            return;
+        }
+        int count = 0;
+        for (int a = 0, size = messages.size(); a < size; a++) {
+            if (isFolderFeedUnread(messages.get(a))) {
+                count++;
             }
         }
+        folderFeedUnreadCount = count;
+        sideControlsButtonsLayout.setButtonCount(ChatActivitySideControlsButtonsLayout.BUTTON_FEED_NEXT_UNREAD, count, animated);
+        sideControlsButtonsLayout.showButton(ChatActivitySideControlsButtonsLayout.BUTTON_FEED_NEXT_UNREAD, count > 0, animated);
+    }
+
+    /** Scrolls to the closest unread post below the screen (newer), or else to any remaining unread post. */
+    private void scrollToNextFolderFeedUnread() {
+        if (chatListView == null || messages.isEmpty()) {
+            return;
+        }
+        wasManualScroll = true;
+        // messages[0] is the newest post (bottom of the list); find the newest post on screen.
+        int newestVisibleIndex = messages.size();
+        for (int i = 0, n = chatListView.getChildCount(); i < n; i++) {
+            View child = chatListView.getChildAt(i);
+            if (child instanceof ChatMessageCell) {
+                int index = messages.indexOf(((ChatMessageCell) child).getMessageObject());
+                if (index >= 0 && index < newestVisibleIndex) {
+                    newestVisibleIndex = index;
+                }
+            }
+        }
+        MessageObject target = null;
+        for (int i = Math.min(newestVisibleIndex, messages.size()) - 1; i >= 0; i--) {
+            if (isFolderFeedUnread(messages.get(i))) {
+                target = messages.get(i);
+                break;
+            }
+        }
+        if (target == null) {
+            for (int i = messages.size() - 1; i >= 0; i--) {
+                if (isFolderFeedUnread(messages.get(i))) {
+                    target = messages.get(i);
+                    break;
+                }
+            }
+        }
+        if (target == null) {
+            updateFolderFeedUnreadButton(true);
+            return;
+        }
+        scrollToMessageId(target.getId(), 0, true, 0, true, 0);
     }
 
     /** Reloads the merged folder feed from the newest posts. */
@@ -48985,6 +49039,7 @@ public class ChatActivity extends BaseFragment implements
         }
         FolderFeedController.getInstance(currentAccount).stop(classGuid);
         clearChatData(true);
+        updateFolderFeedUnreadButton(false);
         startMessageAppearTransitionMs = 0;
         firstMessagesLoaded = false;
         loading = false;
