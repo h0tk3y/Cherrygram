@@ -74,6 +74,9 @@ jobs:
         with:
           gradle-version: '8.13'
           validate-wrappers: false
+          # Cache Gradle and dependencies on this (non-default) branch too, so runs don't depend on
+          # services.gradle.org being reachable (it returned HTTP 504 once).
+          cache-read-only: false
 
       - name: Prepare sources (stubs, signing, ABIs)
         env:
