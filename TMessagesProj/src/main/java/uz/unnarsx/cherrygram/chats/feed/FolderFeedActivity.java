@@ -15,8 +15,10 @@ import android.content.Context;
 import android.os.Bundle;
 import android.text.TextUtils;
 import android.view.Gravity;
+import android.view.MotionEvent;
 import android.view.View;
 import android.widget.FrameLayout;
+import android.widget.LinearLayout;
 
 import org.telegram.messenger.LocaleController;
 import org.telegram.messenger.MessagesController;
@@ -28,6 +30,7 @@ import org.telegram.ui.ActionBar.AlertDialog;
 import org.telegram.ui.ActionBar.BaseFragment;
 import org.telegram.ui.ActionBar.INavigationLayout;
 import org.telegram.ui.ActionBar.Theme;
+import org.telegram.ui.Cells.UserCell;
 import org.telegram.ui.ChatActivity;
 import org.telegram.ui.ChatActivityContainer;
 import org.telegram.ui.Components.LayoutHelper;
@@ -121,23 +124,37 @@ public class FolderFeedActivity extends BaseFragment {
         if (channels.isEmpty()) {
             return;
         }
-        CharSequence[] titles = new CharSequence[channels.size()];
-        for (int i = 0; i < channels.size(); i++) {
-            titles[i] = channels.get(i).title;
-        }
         AlertDialog.Builder builder = new AlertDialog.Builder(getParentActivity(), getResourceProvider());
         builder.setTitle(getString(R.string.CG_FolderFeed_Channels));
-        builder.setItems(titles, (dialog, which) -> {
-            if (which < 0 || which >= channels.size()) {
-                return;
-            }
-            Bundle args = new Bundle();
-            args.putLong("chat_id", channels.get(which).id);
-            if (getMessagesController().checkCanOpenChat(args, FolderFeedActivity.this)) {
-                presentFragment(new ChatActivity(args));
-            }
-        });
-        showDialog(builder.create());
+        // AlertDialog already wraps the custom view in a ScrollView, so a plain vertical list is enough.
+        LinearLayout listLayout = new LinearLayout(getParentActivity());
+        listLayout.setOrientation(LinearLayout.VERTICAL);
+        builder.setView(listLayout);
+        AlertDialog dialog = builder.create();
+        for (int i = 0; i < channels.size(); i++) {
+            TLRPC.Chat chat = channels.get(i);
+            UserCell cell = new UserCell(getParentActivity(), 16, 0, false, false, getResourceProvider(), false, false) {
+                @Override
+                public boolean onInterceptTouchEvent(MotionEvent ev) {
+                    // The whole row opens the channel: keep the avatar's own profile/story taps from firing.
+                    return true;
+                }
+            };
+            // Always a second line, so rows without a known subscriber count stay vertically centred.
+            CharSequence status = chat.participants_count > 0 ? LocaleController.formatPluralString("Subscribers", chat.participants_count) : getString(R.string.AccDescrChannel);
+            cell.setData(chat, chat.title, status, 0);
+            cell.setBackground(Theme.createSelectorDrawable(getThemedColor(Theme.key_dialogButtonSelector), Theme.RIPPLE_MASK_ALL));
+            cell.setOnClickListener(v -> {
+                dialog.dismiss();
+                Bundle args = new Bundle();
+                args.putLong("chat_id", chat.id);
+                if (getMessagesController().checkCanOpenChat(args, FolderFeedActivity.this)) {
+                    presentFragment(new ChatActivity(args));
+                }
+            });
+            listLayout.addView(cell, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT));
+        }
+        showDialog(dialog);
     }
 
     @Override
