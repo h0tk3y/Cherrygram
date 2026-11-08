@@ -56,9 +56,6 @@ public class FoldersPreferencesEntry extends BaseCGPreferencesEntry {
 
     private final int telegramFoldersSettings = 8;
 
-    private final int folderFeedRow = 9;
-    private final int folderFeedEntryRow = 10;
-
     @Override
     protected CharSequence getTitle() {
         FirebaseAnalyticsHelper.INSTANCE.trackEventWithEmptyBundle("folders_preferences_screen");
@@ -106,15 +103,6 @@ public class FoldersPreferencesEntry extends BaseCGPreferencesEntry {
                 .setChecked(CherrygramAppearanceConfig.INSTANCE.getFoldersAtBottom()).setLocked(!DonatesManager.INSTANCE.didUserDonateForFeature())
                 .slug("foldersAtBottom")
         );
-        items.add(UItem.asShadow(null));
-
-        items.add(SettingsHelper.asSwitchCG(folderFeedRow, applyNewSpan(getString(R.string.CG_FolderFeed)), getString(R.string.CG_FolderFeed_Desc))
-                .setChecked(CherrygramAppearanceConfig.INSTANCE.getFolderChannelsFeed())
-                .slug("folderChannelsFeed")
-        );
-        if (CherrygramAppearanceConfig.INSTANCE.getFolderChannelsFeed()) {
-            items.add(UItem.asButton(folderFeedEntryRow, getString(R.string.CG_FolderFeed_Entry), getFolderFeedEntryValue()));
-        }
         items.add(UItem.asShadow(null));
 
         items.add(UItem.asHeader(getString(R.string.AppName)));
@@ -207,43 +195,7 @@ public class FoldersPreferencesEntry extends BaseCGPreferencesEntry {
             showRestartBulletin();
         } else if (item.id == telegramFoldersSettings) {
             presentFragment(new FiltersSetupActivity());
-        } else if (item.id == folderFeedRow) {
-            CherrygramAppearanceConfig.INSTANCE.setFolderChannelsFeed(!CherrygramAppearanceConfig.INSTANCE.getFolderChannelsFeed());
-            SettingsHelper.updateCheckState(view, CherrygramAppearanceConfig.INSTANCE.getFolderChannelsFeed());
-            notifyFolderFeedChanged();
-            updateRows(true);
-        } else if (item.id == folderFeedEntryRow) {
-            ArrayList<String> configStringKeys = new ArrayList<>();
-            ArrayList<Integer> configValues = new ArrayList<>();
-
-            configStringKeys.add(getString(R.string.CG_FolderFeed_Entry_Pinned));
-            configValues.add(CherrygramAppearanceConfig.FOLDER_FEED_ENTRY_PINNED);
-
-            configStringKeys.add(getString(R.string.CG_FolderFeed_Entry_ActionBar));
-            configValues.add(CherrygramAppearanceConfig.FOLDER_FEED_ENTRY_ACTION_BAR);
-
-            configStringKeys.add(getString(R.string.CG_FolderFeed_Entry_Both));
-            configValues.add(CherrygramAppearanceConfig.FOLDER_FEED_ENTRY_BOTH);
-
-            PopupHelper.show(configStringKeys, getString(R.string.CG_FolderFeed_Entry), configValues.indexOf(CherrygramAppearanceConfig.INSTANCE.getFolderChannelsFeedEntry()), getContext(), i -> {
-                CherrygramAppearanceConfig.INSTANCE.setFolderChannelsFeedEntry(configValues.get(i));
-                SettingsHelper.updateButtonValue(view, getFolderFeedEntryValue());
-                notifyFolderFeedChanged();
-            });
         }
-    }
-
-    private void notifyFolderFeedChanged() {
-        getNotificationCenter().postNotificationName(NotificationCenter.dialogFiltersUpdated);
-        getNotificationCenter().postNotificationName(NotificationCenter.dialogsNeedReload);
-    }
-
-    private String getFolderFeedEntryValue() {
-        return switch (CherrygramAppearanceConfig.INSTANCE.getFolderChannelsFeedEntry()) {
-            case CherrygramAppearanceConfig.FOLDER_FEED_ENTRY_ACTION_BAR -> getString(R.string.CG_FolderFeed_Entry_ActionBar);
-            case CherrygramAppearanceConfig.FOLDER_FEED_ENTRY_BOTH -> getString(R.string.CG_FolderFeed_Entry_Both);
-            default -> getString(R.string.CG_FolderFeed_Entry_Pinned);
-        };
     }
 
     private String getTabModeValue() {

@@ -89,6 +89,7 @@ import java.util.Objects;
 import uz.unnarsx.cherrygram.chats.feed.FolderFeedController;
 import uz.unnarsx.cherrygram.chats.feed.FolderFeedEntryCell;
 import uz.unnarsx.cherrygram.core.configs.CherrygramAppearanceConfig;
+import uz.unnarsx.cherrygram.core.configs.CherrygramChatsConfig;
 
 public class DialogsAdapter extends RecyclerListView.SelectionAdapter implements DialogCell.DialogCellDelegate {
     public final static int VIEW_TYPE_DIALOG = 0,
@@ -1728,7 +1729,7 @@ public class DialogsAdapter extends RecyclerListView.SelectionAdapter implements
 
         // Cherrygram: pinned entry opening the merged feed of the folder's channels.
         if ((dialogsType == 7 || dialogsType == 8) && requestPeerType == null && parentFragment != null && !parentFragment.isOnlySelect()
-                && CherrygramAppearanceConfig.INSTANCE.getFolderChannelsFeed() && CherrygramAppearanceConfig.INSTANCE.showFolderFeedPinnedEntry()
+                && CherrygramChatsConfig.INSTANCE.getFolderChannelsFeed() && CherrygramChatsConfig.INSTANCE.showFolderFeedPinnedEntry()
                 && FolderFeedController.isAvailableForFilter(currentAccount, filter)) {
             itemInternals.add(new ItemInternal(VIEW_TYPE_FOLDER_FEED));
             hasFolderFeedEntry = true;

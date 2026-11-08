@@ -32,7 +32,7 @@ import java.util.Collections;
 import java.util.HashSet;
 import java.util.Iterator;
 
-import uz.unnarsx.cherrygram.core.configs.CherrygramAppearanceConfig;
+import uz.unnarsx.cherrygram.core.configs.CherrygramChatsConfig;
 
 /**
  * Loads the posts of every broadcast channel in a chat folder and merges them into a single
@@ -88,7 +88,7 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
     // region Folder helpers
 
     public static boolean isFeatureEnabled() {
-        return CherrygramAppearanceConfig.INSTANCE.getFolderChannelsFeed();
+        return CherrygramChatsConfig.INSTANCE.getFolderChannelsFeed();
     }
 
     private static final Object channelsCacheLock = new Object();

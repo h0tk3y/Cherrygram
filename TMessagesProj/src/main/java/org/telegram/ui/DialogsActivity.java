@@ -14963,7 +14963,7 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
         if (folderFeedItem == null) {
             return;
         }
-        boolean show = CherrygramAppearanceConfig.INSTANCE.showFolderFeedActionBarButton() && FolderFeedController.isAvailableForFilter(currentAccount, filter);
+        boolean show = CherrygramChatsConfig.INSTANCE.showFolderFeedActionBarButton() && FolderFeedController.isAvailableForFilter(currentAccount, filter);
         folderFeedItem.setVisibility(show ? View.VISIBLE : View.GONE);
     }
     /** Cherrygram finish */

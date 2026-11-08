@@ -72,14 +72,6 @@ object CherrygramAppearanceConfig {
     var folderNameInHeader by sharedPreferences.boolean("AP_FolderNameInHeader", false)
     var foldersAtBottom by sharedPreferences.boolean("AP_FoldersAtBottom", false)
 
-    /** Merged feed of all channels of a folder */
-    var folderChannelsFeed by sharedPreferences.boolean("AP_FolderChannelsFeed", false)
-    const val FOLDER_FEED_ENTRY_PINNED = 0
-    const val FOLDER_FEED_ENTRY_ACTION_BAR = 1
-    const val FOLDER_FEED_ENTRY_BOTH = 2
-    var folderChannelsFeedEntry by sharedPreferences.int("AP_FolderChannelsFeedEntry", FOLDER_FEED_ENTRY_BOTH)
-    fun showFolderFeedPinnedEntry(): Boolean = folderChannelsFeedEntry != FOLDER_FEED_ENTRY_ACTION_BAR
-    fun showFolderFeedActionBarButton(): Boolean = folderChannelsFeedEntry != FOLDER_FEED_ENTRY_PINNED
     /** Folders finish */
 
     /** Main tabs start */
