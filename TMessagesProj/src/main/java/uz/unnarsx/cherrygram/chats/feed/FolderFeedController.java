@@ -152,7 +152,16 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
 
     /** Whether the merged feed entry points should be shown for the folder. */
     public static boolean isAvailableForFilter(int account, @Nullable MessagesController.DialogFilter filter) {
-        return isFeatureEnabled() && filter != null && !filter.isDefault() && getFeedChannelsCount(account, filter) >= MIN_CHANNELS;
+        return isFeatureEnabled() && filter != null && !filter.isDefault() && !excludesReadChats(filter)
+                && getFeedChannelsCount(account, filter) >= MIN_CHANNELS;
+    }
+
+    /**
+     * Folders that hide read chats (e.g. Telegram's "Unread" preset) lose channels while the feed
+     * marks posts as read, so a merged feed of them would shrink under the reader: not offered.
+     */
+    private static boolean excludesReadChats(MessagesController.DialogFilter filter) {
+        return (filter.flags & MessagesController.DIALOG_FILTER_FLAG_EXCLUDE_READ) != 0;
     }
 
     @Nullable
