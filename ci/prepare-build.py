@@ -9,7 +9,8 @@ native modules) are closed-source and gitignored, and the signing key is private
   2. creates secrets_for_ci.env from the example file,
   3. installs the throwaway CI signing key (ci/ci-test-signing.jks) where the build expects it,
   4. limits native builds to arm64-v8a (phones) and x86_64 (emulator), builds native code optimized
-     even for the debug APK, and enables ccache.
+     even for the debug APK, and enables ccache,
+  5. makes buildSrc resolve plugins from Maven Central before the Gradle Plugin Portal.
 
 (Debug builds already switch to Telegram's test servers when the country code 999 is entered on the
 login screen, which the emulator UI test relies on.)
@@ -82,6 +83,22 @@ def main():
     text = text.replace(marker, marker.replace('abiFilters "armeabi-v7a", "arm64-v8a"/*, "x86", "x86_64"*/', 'abiFilters "arm64-v8a", "x86_64"'))
     with open(app_gradle, "w", encoding="utf-8") as f:
         f.write(text)
+
+    # buildSrc's `kotlin-dsl` plugin (and the Kotlin compiler it pulls in) resolves through plugin
+    # management, which defaults to the Gradle Plugin Portal only. The portal redirects JetBrains
+    # artifacts to GitHub release downloads, which returned HTTP 504; prefer Maven Central.
+    buildsrc_settings = path("buildSrc", "settings.gradle.kts")
+    if not os.path.exists(buildsrc_settings):
+        with open(buildsrc_settings, "w", encoding="utf-8") as f:
+            f.write(
+                "pluginManagement {\n"
+                "    repositories {\n"
+                "        mavenCentral()\n"
+                "        google()\n"
+                "        gradlePluginPortal()\n"
+                "    }\n"
+                "}\n"
+            )
 
     print("prepare-build: done")
 
