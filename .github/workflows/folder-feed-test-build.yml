@@ -70,9 +70,33 @@ jobs:
 
       # The repository's gradle-wrapper.jar does not match any official Gradle release checksum, so
       # it is not executed: install the official Gradle version it pins and run `gradle` instead.
+      # Downloaded with retries and mirror fallbacks (Gradle's download host returned HTTP 504),
+      # accepted only if it matches the official checksum from https://gradle.org/release-checksums/.
+      - name: Install Gradle 8.13
+        run: |
+          SHA=20f1b1176237254a6fc204d8434196fa11a4cfb387567519c61556e8710aed78
+          ZIP="$RUNNER_TEMP/gradle-8.13-bin.zip"
+          OK=0
+          for url in \
+            https://services.gradle.org/distributions/gradle-8.13-bin.zip \
+            https://downloads.gradle.org/distributions/gradle-8.13-bin.zip \
+            https://mirrors.cloud.tencent.com/gradle/gradle-8.13-bin.zip \
+            https://mirrors.aliyun.com/gradle/distributions/v8.13.0/gradle-8.13-bin.zip; do
+            for attempt in 1 2 3; do
+              echo "Downloading $url (attempt $attempt)"
+              if curl -fsSL --max-time 300 -o "$ZIP" "$url" && echo "$SHA  $ZIP" | sha256sum -c -; then
+                OK=1
+                break 2
+              fi
+              sleep $((attempt * 10))
+            done
+          done
+          if [ "$OK" != 1 ]; then echo "::error::Could not download a verified Gradle 8.13"; exit 1; fi
+          unzip -q "$ZIP" -d "$RUNNER_TEMP/gradle"
+          echo "$RUNNER_TEMP/gradle/gradle-8.13/bin" >> "$GITHUB_PATH"
+
       - uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: '8.13'
           validate-wrappers: false
           # Cache Gradle and dependencies on this (non-default) branch too, so runs don't depend on
           # services.gradle.org being reachable (it returned HTTP 504 once).
@@ -92,6 +116,7 @@ jobs:
           CCACHE_COMPILERCHECK: content
         run: |
           ccache -z || true
+          gradle --version
           gradle :TMessagesProj_App:assembleAfatDebug -PAPP_PACKAGE=$APP_PACKAGE --stacktrace --no-daemon
           ccache -s || true
 
