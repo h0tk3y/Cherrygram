@@ -718,6 +718,7 @@ public class ChatActivity extends BaseFragment implements
     public static final int MODE_FOLDER_FEED = 100;
     public int folderFeedFilterId;
     private boolean folderFeedHasNewPosts;
+    private int folderFeedNewPostsCount;
 
     public static final int SEARCH_THIS_CHAT = 0;
     public static final int SEARCH_MY_MESSAGES = 1;
@@ -7273,6 +7274,10 @@ public class ChatActivity extends BaseFragment implements
                         if (dy >= 0) {
                             canShowPagedownButton = false;
                             updatePagedownButtonVisibility(true);
+                            if (chatMode == MODE_FOLDER_FEED && folderFeedHasNewPosts && !loading) {
+                                // Scrolled down to the newest loaded post: show the posts that arrived meanwhile.
+                                AndroidUtilities.runOnUIThread(ChatActivity.this::reloadFolderFeed);
+                            }
                         }
                     } else {
                         final boolean isPageDownButtonVisible = sideControlsButtonsLayout.isButtonVisible(
@@ -11124,6 +11129,11 @@ public class ChatActivity extends BaseFragment implements
     private boolean forceScrollToMessageBottom;
 
     public void onPageDownClicked(boolean clearStack) {
+        if (chatMode == MODE_FOLDER_FEED && folderFeedHasNewPosts) {
+            // New posts arrived while scrolled up: reload the merged feed from the newest post.
+            reloadFolderFeed();
+            return;
+        }
         wasManualScroll = true;
         textSelectionHelper.cancelTextSelectionRunnable();
         final Runnable inCaseLoading = () -> {
@@ -17726,7 +17736,7 @@ public class ChatActivity extends BaseFragment implements
         if (sideControlsButtonsLayout == null) {
             return;
         }
-        boolean show = canShowPagedownButton && !hasTextSelection() && !chatActivityEnterView.isRecordingAudioVideo() && !isInsideContainer && (!searching || getMediaDataController().searchResultMessages.isEmpty());
+        boolean show = canShowPagedownButton && !hasTextSelection() && !chatActivityEnterView.isRecordingAudioVideo() && (!isInsideContainer || chatMode == MODE_FOLDER_FEED) && (!searching || getMediaDataController().searchResultMessages.isEmpty());
         if (show) {
             if (animated && (openAnimationStartTime == 0 || SystemClock.elapsedRealtime() < openAnimationStartTime + 150)) {
                 animated = false;
@@ -48866,18 +48876,23 @@ public class ChatActivity extends BaseFragment implements
                 AndroidUtilities.runOnUIThread(() -> checkScrollForLoad(false));
             }
         } else if (id == NotificationCenter.cgFolderFeedNewPosts) {
-            if ((Integer) args[0] != classGuid || folderFeedHasNewPosts) {
+            if ((Integer) args[0] != classGuid) {
                 return;
             }
             folderFeedHasNewPosts = true;
+            folderFeedNewPostsCount += (Integer) args[1];
             // Deferred: the dialog's last message date is updated after didReceiveNewMessages is posted.
             AndroidUtilities.runOnUIThread(() -> {
+                if (!folderFeedHasNewPosts) {
+                    return;
+                }
                 if (chatLayoutManager != null && chatLayoutManager.findFirstVisibleItemPosition() <= 1 && !loading) {
                     reloadFolderFeed();
-                } else {
-                    Bulletin bulletin = BulletinFactory.of(this).createSimpleBulletin(R.raw.chats_infotip, getString(R.string.CG_FolderFeed_NewPosts), getString(R.string.CG_FolderFeed_Refresh), this::reloadFolderFeed);
-                    bulletin.setOnHideListener(() -> folderFeedHasNewPosts = false);
-                    bulletin.show();
+                } else if (sideControlsButtonsLayout != null) {
+                    // Like regular channels: the jump-to-bottom button shows how many new posts wait below.
+                    canShowPagedownButton = true;
+                    updatePagedownButtonVisibility(true);
+                    sideControlsButtonsLayout.setButtonCount(ChatActivitySideControlsButtonsLayout.BUTTON_PAGE_DOWN, folderFeedNewPostsCount, true);
                 }
             });
         }
@@ -48940,6 +48955,12 @@ public class ChatActivity extends BaseFragment implements
             return;
         }
         folderFeedHasNewPosts = false;
+        folderFeedNewPostsCount = 0;
+        if (sideControlsButtonsLayout != null) {
+            sideControlsButtonsLayout.setButtonCount(ChatActivitySideControlsButtonsLayout.BUTTON_PAGE_DOWN, 0, true);
+            canShowPagedownButton = false;
+            updatePagedownButtonVisibility(true);
+        }
         FolderFeedController.getInstance(currentAccount).stop(classGuid);
         clearChatData(true);
         startMessageAppearTransitionMs = 0;
