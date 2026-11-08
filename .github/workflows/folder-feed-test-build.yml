@@ -95,12 +95,13 @@ jobs:
           unzip -q "$ZIP" -d "$RUNNER_TEMP/gradle"
           echo "$RUNNER_TEMP/gradle/gradle-8.13/bin" >> "$GITHUB_PATH"
 
+      # No Gradle User Home cache: a cache saved by a failed run kept a stale GitHub release URL for a
+      # Maven Central artifact. Dependencies come fresh from Maven Central/Google each run; the slow
+      # native build has its own ccache.
       - uses: gradle/actions/setup-gradle@v4
         with:
           validate-wrappers: false
-          # Cache Gradle and dependencies on this (non-default) branch too, so runs don't depend on
-          # services.gradle.org being reachable (it returned HTTP 504 once).
-          cache-read-only: false
+          cache-disabled: true
 
       - name: Prepare sources (stubs, signing, ABIs)
         env:
@@ -117,7 +118,7 @@ jobs:
         run: |
           ccache -z || true
           gradle --version
-          gradle :TMessagesProj_App:assembleAfatDebug -PAPP_PACKAGE=$APP_PACKAGE --stacktrace --no-daemon
+          gradle :TMessagesProj_App:assembleAfatDebug -PAPP_PACKAGE=$APP_PACKAGE --stacktrace --no-daemon --refresh-dependencies
           ccache -s || true
 
       # Saved even when a later (Java/Kotlin) step fails, so the slow native build is reused.
