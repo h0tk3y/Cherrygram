@@ -22,6 +22,7 @@ import org.telegram.messenger.MessagesController;
 import org.telegram.messenger.MessagesStorage;
 import org.telegram.messenger.NotificationCenter;
 import org.telegram.messenger.UserConfig;
+import org.telegram.messenger.Utilities;
 import org.telegram.tgnet.ConnectionsManager;
 import org.telegram.tgnet.SerializedData;
 import org.telegram.tgnet.TLRPC;
@@ -40,17 +41,21 @@ import uz.unnarsx.cherrygram.core.configs.CherrygramChatsConfig;
  * time-ordered stream that {@link ChatActivity} renders in {@link ChatActivity#MODE_FOLDER_FEED}.
  * <p>
  * Telegram has no server method returning the history of a folder, so each channel's history is
- * paged separately with {@code messages.getHistory} and merged on the client. Every channel keeps a
- * "frontier": an upper bound for the date of its not-yet-fetched posts (initially the date of the
- * channel's last message as known from the dialogs list, afterwards the date of the oldest fetched
- * post). A fetched post is only emitted once its date is not older than the frontier of every
- * channel that may still have unfetched posts, so the merged order is exact while channels whose
- * posts are too old for the current screen are never requested.
+ * paged separately with {@code messages.getHistory} and merged on the client. Like a channel, the feed
+ * opens at the oldest unread post across its channels: a short probe after each unread channel's read
+ * pointer finds its first unread post, and every channel is then loaded around the time of the oldest
+ * one. From there the feed pages in both directions.
+ * <p>
+ * Each channel keeps two edges of its loaded range. Each edge has a "frontier": a bound for the date of
+ * the posts beyond it that are not fetched yet (the date of the outermost fetched post). A fetched post is
+ * only shown once no channel that may still have unfetched posts on that side could have one between it
+ * and the posts already shown, so the merged order is exact while channels whose posts are too far away
+ * for the current screen are never requested.
  * <p>
  * Messages from different channels may share ids, but {@link ChatActivity} keys messages by id, so
- * every emitted message gets a synthetic, strictly decreasing id ({@code messageOwner.id}) and its
- * real id is kept in {@code messageOwner.realId} (see {@link MessageObject#getRealId()}), the same
- * approach the hashtag search uses.
+ * every emitted message gets a synthetic id ({@code messageOwner.id}) that grows from older to newer
+ * posts, and its real id is kept in {@code messageOwner.realId} (see {@link MessageObject#getRealId()}),
+ * the same approach the hashtag search uses.
  */
 public class FolderFeedController implements NotificationCenter.NotificationCenterDelegate {
 
@@ -58,11 +63,19 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
 
     private static final int PAGE_SIZE = 20;
     private static final int FETCH_LIMIT = 20;
-    private static final int MAX_PARALLEL_REQUESTS = 3;
+    /** Opening: posts fetched per unread channel right after its read pointer, to find its first unread post. */
+    private static final int PROBE_LIMIT = 5;
+    /** Opening: posts fetched per channel at or after / before the time of the oldest first unread post. */
+    private static final int AROUND_NEWER = 20;
+    private static final int AROUND_OLDER = 10;
+    /**
+     * getHistory requests in flight at once. Telegram has no multi-chat history method, but parallel
+     * requests share MTProto containers, so a few in flight cost little; after a FLOOD_WAIT the
+     * controller falls back to a gentle limit.
+     */
+    private static final int MAX_PARALLEL_REQUESTS = 8;
+    private static final int FLOOD_PARALLEL_REQUESTS = 2;
     private static final int MAX_RETRIES = 3;
-    /** The first load continues past one page to reach the oldest unread post, up to this many posts. */
-    private static final int FIRST_LOAD_CAP = 300;
-    private static final int MAX_FETCH_LIMIT = 100;
     private static final long CHANNELS_CACHE_MS = 1000;
 
     private static final FolderFeedController[] Instance = new FolderFeedController[UserConfig.MAX_ACCOUNT_COUNT];
@@ -84,6 +97,7 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
     /** Sessions keyed by the classGuid of the ChatActivity that displays them. */
     private final SparseArray<Session> sessions = new SparseArray<>();
     private boolean observing;
+    private int maxParallel = MAX_PARALLEL_REQUESTS;
 
     private FolderFeedController(int account) {
         currentAccount = account;
@@ -192,6 +206,22 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
         return new int[]{count, anyUnmuted ? 1 : 0};
     }
 
+    /**
+     * Unread posts across the feed's channels as counted by the server, muted channels included, like
+     * a channel's own "next unread" counter.
+     */
+    public static int getFeedUnreadCount(int account, @Nullable MessagesController.DialogFilter filter) {
+        MessagesController controller = MessagesController.getInstance(account);
+        int count = 0;
+        for (TLRPC.Chat chat : getFeedChannels(account, filter)) {
+            TLRPC.Dialog dialog = controller.dialogs_dict.get(-chat.id);
+            if (dialog != null && dialog.unread_count > 0) {
+                count += dialog.unread_count;
+            }
+        }
+        return count;
+    }
+
     @Nullable
     public static MessagesController.DialogFilter findFilter(int account, int filterId) {
         return MessagesController.getInstance(account).dialogFiltersById.get(filterId);
@@ -201,40 +231,78 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
 
     // region Sessions
 
-    private static class Source {
-        final long dialogId;
-        final TLRPC.InputPeer peer;
-        /** Real id of the oldest fetched post; 0 means nothing was fetched yet. */
+    /** One edge (older or newer) of a channel's loaded range of history. */
+    private static class Edge {
+        /** Real id of the outermost fetched post on this edge (including service messages); 0 = none yet. */
         int offsetId;
-        /** Upper bound of the date of every post that is not fetched yet. */
+        /** Bound for the date of every post on this edge that is not fetched yet: upper bound for the older
+         *  edge, lower bound for the newer edge. */
         int frontier;
         boolean exhausted;
         boolean inFlight;
         int reqId;
         int retries;
+        /** Fetched posts not shown yet, ordered from the loaded range outwards: the older edge keeps them
+         *  newest first, the newer edge oldest first. */
+        final ArrayList<TLRPC.Message> buffer = new ArrayList<>();
+    }
+
+    private static class Source {
+        final long dialogId;
+        final TLRPC.InputPeer peer;
+        final Edge older = new Edge();
+        final Edge newer = new Edge();
+        /** Real ids of every post handed to a buffer, so the two edges never yield the same post twice. */
+        final HashSet<Integer> seen = new HashSet<>();
         /** Read pointer and unread count when the feed was opened (posts with id > readMax are unread). */
         int readMax;
         int unreadCount;
-        final ArrayList<TLRPC.Message> buffer = new ArrayList<>();
+        /** Opening probe: date of the channel's first unread post, 0 if it has none (or only service ones). */
+        int firstUnreadDate;
+        boolean probeDone;
+        boolean aroundDone;
+        boolean requestInFlight;
+        int requestId;
+        int requestRetries;
 
-        Source(long dialogId, TLRPC.InputPeer peer, int frontier) {
+        Source(long dialogId, TLRPC.InputPeer peer) {
             this.dialogId = dialogId;
             this.peer = peer;
-            this.frontier = frontier;
+        }
+
+        boolean hasUnread() {
+            return unreadCount > 0 && readMax > 0;
         }
     }
+
+    private static final int STATE_PROBING = 0;
+    private static final int STATE_AROUND = 1;
+    private static final int STATE_READY = 2;
+
+    /** Direction reported with {@link NotificationCenter#cgFolderFeedLoaded}. */
+    public static final int LOADED_INITIAL = 0;
+    public static final int LOADED_OLDER = 1;
+    public static final int LOADED_NEWER = 2;
+
+    /** Synthetic ids grow outwards from here: older posts count down, newer posts count up. */
+    private static final int ID_BASE = 1_000_000_000;
 
     private static class Session {
         final int guid;
         final int filterId;
         final ArrayList<Source> sources = new ArrayList<>();
         final HashSet<Long> dialogIds = new HashSet<>();
-        int nextGeneratedId = Integer.MAX_VALUE - 1;
-        /** The first load opens the feed at the oldest unread post, like a channel opens at its first unread. */
-        boolean firstLoad = true;
-        boolean loading;
-        boolean endReached;
-        int pendingLoadIndex;
+        int state;
+        /** Date of the oldest first-unread post across the channels; the feed opens there. */
+        int anchorDate;
+        int nextOlderId = ID_BASE;
+        int nextNewerId = ID_BASE + 1;
+        boolean initialPending = true;
+        int initialLoadIndex;
+        boolean loadingOlder;
+        int olderLoadIndex;
+        boolean loadingNewer;
+        int newerLoadIndex;
 
         Session(int guid, int filterId) {
             this.guid = guid;
@@ -242,32 +310,63 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
         }
     }
 
-    /** Starts (or restarts) the feed displayed by the ChatActivity with the given classGuid. */
-    public void start(int guid, int filterId, int loadIndex) {
+    /**
+     * Starts (or restarts) the feed displayed by the ChatActivity with the given classGuid. Unless
+     * {@code atLatest} is set, it opens at the oldest unread post across the channels, like a channel
+     * opens at its first unread post, loading every channel around that time; otherwise (or when nothing
+     * is unread) it opens at the newest posts.
+     */
+    public void start(int guid, int filterId, int loadIndex, boolean atLatest) {
         stop(guid);
         Session session = new Session(guid, filterId);
+        session.initialLoadIndex = loadIndex;
         MessagesController controller = MessagesController.getInstance(currentAccount);
         ArrayList<TLRPC.Chat> channels = getFeedChannels(currentAccount, findFilter(currentAccount, filterId));
+        boolean anyUnread = false;
         for (TLRPC.Chat chat : channels) {
             long dialogId = -chat.id;
             TLRPC.InputPeer peer = controller.getInputPeer(dialogId);
             if (peer == null || peer instanceof TLRPC.TL_inputPeerEmpty) {
                 continue;
             }
+            Source source = new Source(dialogId, peer);
             TLRPC.Dialog dialog = controller.dialogs_dict.get(dialogId);
-            int frontier = dialog != null && dialog.last_message_date > 0 ? dialog.last_message_date : Integer.MAX_VALUE;
-            Source source = new Source(dialogId, peer, frontier);
             if (dialog != null) {
                 Integer localReadMax = controller.dialogs_read_inbox_max.get(dialogId);
                 source.readMax = Math.max(dialog.read_inbox_max_id, localReadMax != null ? localReadMax : 0);
                 source.unreadCount = dialog.unread_count;
             }
+            anyUnread |= source.hasUnread();
             session.sources.add(source);
             session.dialogIds.add(dialogId);
         }
         sessions.put(guid, session);
         updateObserving();
-        loadMore(guid, loadIndex);
+        if (atLatest || !anyUnread) {
+            startAtLatest(session);
+        } else {
+            session.state = STATE_PROBING;
+            for (Source source : session.sources) {
+                source.probeDone = !source.hasUnread();
+            }
+        }
+        pump(session);
+    }
+
+    /** Opens at the newest posts: only the older edge loads, the newer edge is at the live end. */
+    private void startAtLatest(Session session) {
+        MessagesController controller = MessagesController.getInstance(currentAccount);
+        session.state = STATE_READY;
+        for (Source source : session.sources) {
+            TLRPC.Dialog dialog = controller.dialogs_dict.get(source.dialogId);
+            source.older.offsetId = 0;
+            source.older.frontier = dialog != null && dialog.last_message_date > 0 ? dialog.last_message_date : Integer.MAX_VALUE;
+            source.newer.exhausted = true;
+            source.newer.offsetId = dialog != null ? dialog.top_message : 0;
+            source.newer.frontier = source.older.frontier;
+        }
+        session.loadingOlder = true;
+        session.olderLoadIndex = session.initialLoadIndex;
     }
 
     public void stop(int guid) {
@@ -275,23 +374,31 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
         if (session == null) {
             return;
         }
+        ConnectionsManager connectionsManager = ConnectionsManager.getInstance(currentAccount);
         for (Source source : session.sources) {
-            if (source.inFlight) {
-                ConnectionsManager.getInstance(currentAccount).cancelRequest(source.reqId, false);
+            if (source.requestInFlight) {
+                connectionsManager.cancelRequest(source.requestId, false);
+            }
+            if (source.older.inFlight) {
+                connectionsManager.cancelRequest(source.older.reqId, false);
+            }
+            if (source.newer.inFlight) {
+                connectionsManager.cancelRequest(source.newer.reqId, false);
             }
         }
         sessions.remove(guid);
         updateObserving();
     }
 
+    /** Whether no older posts remain to be loaded. */
     public boolean isEndReached(int guid) {
         Session session = sessions.get(guid);
-        return session == null || session.endReached;
+        return session == null || !hasMore(session, false);
     }
 
     public boolean isLoading(int guid) {
         Session session = sessions.get(guid);
-        return session != null && session.loading;
+        return session != null && (session.initialPending || session.loadingOlder || session.loadingNewer);
     }
 
     public int getChannelsCount(int guid) {
@@ -299,104 +406,369 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
         return session == null ? 0 : session.sources.size();
     }
 
-    /** Loads the next page of older posts. The result arrives as {@link NotificationCenter#messagesDidLoad}. */
-    public void loadMore(int guid, int loadIndex) {
+    /** Loads the next page of older posts, if any. The result arrives as {@link NotificationCenter#messagesDidLoad}. */
+    public boolean loadMore(int guid, int loadIndex) {
         Session session = sessions.get(guid);
-        if (session == null || session.loading || session.endReached) {
-            return;
+        if (session == null || session.state != STATE_READY || session.initialPending || session.loadingOlder || !hasMore(session, false)) {
+            return false;
         }
-        session.loading = true;
-        session.pendingLoadIndex = loadIndex;
-        process(session);
+        session.loadingOlder = true;
+        session.olderLoadIndex = loadIndex;
+        pump(session);
+        return true;
     }
 
-    private void process(Session session) {
-        if (sessions.get(session.guid) != session || !session.loading) {
-            return;
+    /** Loads the next page of newer posts (load_type 1), when the feed was opened away from the newest ones. */
+    public boolean loadNewer(int guid, int loadIndex) {
+        Session session = sessions.get(guid);
+        if (session == null || session.state != STATE_READY || session.initialPending || session.loadingNewer || !hasMore(session, true)) {
+            return false;
         }
-        ArrayList<TLRPC.Message> ready = collectReady(session);
-        boolean pageReady = ready.size() >= PAGE_SIZE;
-        if (pageReady && session.firstLoad && ready.size() < FIRST_LOAD_CAP && !oldestUnreadReady(session)) {
-            // Keep loading so the feed can open at the oldest unread post.
-            pageReady = false;
-        }
-        if (pageReady || noMoreToFetch(session)) {
-            emit(session, ready);
-            return;
-        }
-        // Not enough posts for a page yet: keep them buffered and lower the watermark by fetching
-        // the channels with the newest frontiers, they are the ones holding the merge back.
-        restoreToBuffers(session, ready);
-        int inFlight = 0;
-        ArrayList<Source> candidates = new ArrayList<>();
+        session.loadingNewer = true;
+        session.newerLoadIndex = loadIndex;
+        pump(session);
+        return true;
+    }
+
+    private boolean hasMore(Session session, boolean newer) {
         for (Source source : session.sources) {
-            if (source.inFlight) {
-                inFlight++;
-            } else if (!source.exhausted) {
+            Edge edge = newer ? source.newer : source.older;
+            if (!edge.exhausted || !edge.buffer.isEmpty()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private int inFlightCount(Session session) {
+        int count = 0;
+        for (Source source : session.sources) {
+            if (source.requestInFlight) count++;
+            if (source.older.inFlight) count++;
+            if (source.newer.inFlight) count++;
+        }
+        return count;
+    }
+
+    /** Drives the session: launches requests within the parallelism limit and emits pages when ready. */
+    private void pump(Session session) {
+        if (sessions.get(session.guid) != session) {
+            return;
+        }
+        if (session.state == STATE_PROBING) {
+            boolean allDone = true;
+            for (Source source : session.sources) {
+                if (!source.probeDone) {
+                    allDone = false;
+                    if (!source.requestInFlight && inFlightCount(session) < maxParallel) {
+                        probe(session, source);
+                    }
+                }
+            }
+            if (!allDone) {
+                return;
+            }
+            int anchor = 0;
+            for (Source source : session.sources) {
+                if (source.firstUnreadDate > 0 && (anchor == 0 || source.firstUnreadDate < anchor)) {
+                    anchor = source.firstUnreadDate;
+                }
+            }
+            if (anchor == 0) {
+                // No first unread post could be found: open at the newest posts.
+                startAtLatest(session);
+            } else {
+                session.anchorDate = anchor;
+                session.state = STATE_AROUND;
+            }
+        }
+        if (session.state == STATE_AROUND) {
+            boolean allDone = true;
+            for (Source source : session.sources) {
+                if (!source.aroundDone) {
+                    allDone = false;
+                    if (!source.requestInFlight && inFlightCount(session) < maxParallel) {
+                        loadAround(session, source);
+                    }
+                }
+            }
+            if (!allDone) {
+                return;
+            }
+            session.state = STATE_READY;
+            emitInitialAround(session);
+            return;
+        }
+        if (session.loadingOlder) {
+            processEdge(session, false);
+        }
+        if (session.loadingNewer) {
+            processEdge(session, true);
+        }
+    }
+
+    // --- opening: find the oldest first unread post, then load every channel around its time ---
+
+    private void probe(Session session, Source source) {
+        TLRPC.TL_messages_getHistory req = new TLRPC.TL_messages_getHistory();
+        req.peer = source.peer;
+        // The posts right after the read pointer. The window also covers the read post itself and one
+        // before it, so it does not depend on whether the read post still exists; those are filtered out.
+        req.offset_id = source.readMax;
+        req.add_offset = -PROBE_LIMIT;
+        req.limit = PROBE_LIMIT + 1;
+        source.requestInFlight = true;
+        source.requestId = ConnectionsManager.getInstance(currentAccount).sendRequest(req, (response, error) -> AndroidUtilities.runOnUIThread(() -> {
+            source.requestInFlight = false;
+            if (sessions.get(session.guid) != session) {
+                return;
+            }
+            if (response instanceof TLRPC.messages_Messages) {
+                TLRPC.messages_Messages res = (TLRPC.messages_Messages) response;
+                putUsersAndChats(res);
+                // Any unread message, service ones included: the feed only needs a time at or before the
+                // channel's first unread post.
+                TLRPC.Message first = null;
+                for (TLRPC.Message message : res.messages) {
+                    if (isFromSource(message, source) && message.id > source.readMax && (first == null || message.id < first.id)) {
+                        first = message;
+                    }
+                }
+                source.firstUnreadDate = first != null ? first.date : 0;
+                source.probeDone = true;
+            } else if (!scheduleRetry(session, error, () -> source.requestRetries++ < MAX_RETRIES, () -> source.requestInFlight = true, () -> source.requestInFlight = false)) {
+                source.probeDone = true;
+            } else {
+                return;
+            }
+            pump(session);
+        }));
+    }
+
+    private void loadAround(Session session, Source source) {
+        TLRPC.TL_messages_getHistory req = new TLRPC.TL_messages_getHistory();
+        req.peer = source.peer;
+        // Posts around the anchor time: AROUND_NEWER at or after it, AROUND_OLDER before it.
+        req.offset_date = session.anchorDate;
+        req.add_offset = -AROUND_NEWER;
+        req.limit = AROUND_NEWER + AROUND_OLDER;
+        source.requestInFlight = true;
+        source.requestId = ConnectionsManager.getInstance(currentAccount).sendRequest(req, (response, error) -> AndroidUtilities.runOnUIThread(() -> {
+            source.requestInFlight = false;
+            if (sessions.get(session.guid) != session) {
+                return;
+            }
+            if (response instanceof TLRPC.messages_Messages) {
+                TLRPC.messages_Messages res = (TLRPC.messages_Messages) response;
+                putUsersAndChats(res);
+                TLRPC.Message oldestOlder = null, newestNewer = null;
+                int olderCount = 0, newerCount = 0;
+                for (TLRPC.Message message : res.messages) {
+                    if (!isFromSource(message, source)) {
+                        continue;
+                    }
+                    boolean newer = message.date >= session.anchorDate;
+                    if (newer) {
+                        newerCount++;
+                        if (newestNewer == null || message.id > newestNewer.id) newestNewer = message;
+                    } else {
+                        olderCount++;
+                        if (oldestOlder == null || message.id < oldestOlder.id) oldestOlder = message;
+                    }
+                    if (isPost(message, source) && source.seen.add(message.id)) {
+                        (newer ? source.newer : source.older).buffer.add(message);
+                    }
+                }
+                sortNewestFirst(source.older.buffer);
+                sortOldestFirst(source.newer.buffer);
+                if (oldestOlder != null) {
+                    source.older.offsetId = oldestOlder.id;
+                    source.older.frontier = oldestOlder.date;
+                }
+                source.older.exhausted = olderCount < AROUND_OLDER;
+                if (newestNewer != null) {
+                    source.newer.offsetId = newestNewer.id;
+                    source.newer.frontier = newestNewer.date;
+                }
+                source.newer.exhausted = newerCount < AROUND_NEWER;
+                source.aroundDone = true;
+            } else if (!scheduleRetry(session, error, () -> source.requestRetries++ < MAX_RETRIES, () -> source.requestInFlight = true, () -> source.requestInFlight = false)) {
+                // Give up on this channel for the session rather than blocking the feed.
+                source.older.exhausted = true;
+                source.newer.exhausted = true;
+                source.aroundDone = true;
+            } else {
+                return;
+            }
+            pump(session);
+        }));
+    }
+
+    private void emitInitialAround(Session session) {
+        ArrayList<TLRPC.Message> newer = collectReady(session, true);
+        ArrayList<TLRPC.Message> older = collectReady(session, false);
+        ArrayList<TLRPC.Message> all = new ArrayList<>(newer.size() + older.size());
+        all.addAll(newer);
+        all.addAll(older);
+        // Newest first; ids grow outwards from ID_BASE: this page takes ID_BASE..ID_BASE+n-1.
+        int n = all.size();
+        session.nextOlderId = ID_BASE - 1;
+        session.nextNewerId = ID_BASE + n;
+        ArrayList<MessageObject> messageObjects = new ArrayList<>(n);
+        int firstUnreadId = 0;
+        for (int i = 0; i < n; i++) {
+            TLRPC.Message message = all.get(i);
+            MessageObject messageObject = toMessageObject(message, ID_BASE + n - 1 - i);
+            messageObjects.add(messageObject);
+            Source source = findSource(session, MessageObject.getDialogId(message));
+            if (source != null && source.hasUnread() && message.realId > source.readMax) {
+                firstUnreadId = message.id;
+            }
+        }
+        session.initialPending = false;
+        boolean olderEnd = !hasMore(session, false);
+        boolean newerEnd = !hasMore(session, true);
+        final int fnid = firstUnreadId;
+        final int loadIndex = session.initialLoadIndex;
+        AndroidUtilities.runOnUIThread(() -> {
+            if (sessions.get(session.guid) != session) {
+                return;
+            }
+            // first_unread_id makes ChatActivity open at that post with the "Unread messages" divider; a
+            // non-zero last_message_id that matches no post tells it newer posts remain to be loaded.
+            NotificationCenter.getInstance(currentAccount).postNotificationName(NotificationCenter.messagesDidLoad,
+                    0L, messageObjects.size(), messageObjects, false, fnid, newerEnd ? 0 : Integer.MIN_VALUE, 0, 0, 2, olderEnd,
+                    session.guid, loadIndex, 0, 0, ChatActivity.MODE_FOLDER_FEED);
+            NotificationCenter.getInstance(currentAccount).postNotificationName(NotificationCenter.cgFolderFeedLoaded,
+                    session.guid, olderEnd, LOADED_INITIAL, newerEnd);
+        });
+    }
+
+    // --- paging on either edge: merge by date with per-channel frontiers ---
+
+    private void processEdge(Session session, boolean newer) {
+        ArrayList<TLRPC.Message> ready = collectReady(session, newer);
+        if (ready.size() >= PAGE_SIZE || !anyEdgeLeft(session, newer)) {
+            emitEdge(session, newer, ready);
+            return;
+        }
+        // Not enough posts for a page yet: keep them buffered and move the watermark by fetching the
+        // channels whose frontiers hold the merge back (newest frontier for older pages, oldest for newer).
+        restoreToBuffers(session, ready, newer);
+        ArrayList<Source> candidates = new ArrayList<>();
+        boolean edgeInFlight = false;
+        for (Source source : session.sources) {
+            Edge edge = newer ? source.newer : source.older;
+            if (edge.inFlight) {
+                edgeInFlight = true;
+            } else if (!edge.exhausted) {
                 candidates.add(source);
             }
         }
-        Collections.sort(candidates, (a, b) -> Integer.compare(b.frontier, a.frontier));
-        for (int i = 0; i < candidates.size() && inFlight < MAX_PARALLEL_REQUESTS; i++) {
-            fetch(session, candidates.get(i));
-            inFlight++;
+        if (newer) {
+            Collections.sort(candidates, (a, b) -> Integer.compare(a.newer.frontier, b.newer.frontier));
+        } else {
+            Collections.sort(candidates, (a, b) -> Integer.compare(b.older.frontier, a.older.frontier));
         }
-        if (inFlight == 0) {
-            emit(session, collectReady(session));
+        for (int i = 0; i < candidates.size() && inFlightCount(session) < maxParallel; i++) {
+            fetchEdge(session, candidates.get(i), newer);
+            edgeInFlight = true;
         }
+        if (!edgeInFlight && candidates.isEmpty()) {
+            emitEdge(session, newer, collectReady(session, newer));
+        }
+        // Otherwise wait: pump() runs again whenever a request completes.
     }
 
-    /**
-     * Whether every unread post (as of opening the feed) has been fetched and is ready to be shown,
-     * i.e. no channel with unread posts still has unfetched or watermark-held unread posts.
-     * Call after {@link #collectReady}, which removes the ready posts from the buffers.
-     */
-    private boolean oldestUnreadReady(Session session) {
+    private boolean anyEdgeLeft(Session session, boolean newer) {
         for (Source source : session.sources) {
-            if (source.unreadCount <= 0) {
-                continue;
+            if (!(newer ? source.newer : source.older).exhausted) {
+                return true;
             }
-            if (!source.exhausted && (source.offsetId == 0 || source.offsetId > source.readMax + 1)) {
-                return false;
+        }
+        return false;
+    }
+
+    private void fetchEdge(Session session, Source source, boolean newer) {
+        Edge edge = newer ? source.newer : source.older;
+        TLRPC.TL_messages_getHistory req = new TLRPC.TL_messages_getHistory();
+        req.peer = source.peer;
+        req.offset_id = edge.offsetId;
+        if (newer) {
+            // The posts right after offset_id. As for the probe, the window also covers offset_id itself
+            // and the post before it (filtered out), whether or not the offset post still exists.
+            req.add_offset = -FETCH_LIMIT;
+            req.limit = FETCH_LIMIT + 1;
+        } else {
+            req.limit = FETCH_LIMIT;
+        }
+        edge.inFlight = true;
+        edge.reqId = ConnectionsManager.getInstance(currentAccount).sendRequest(req, (response, error) -> AndroidUtilities.runOnUIThread(() -> {
+            edge.inFlight = false;
+            if (sessions.get(session.guid) != session) {
+                return;
             }
-            for (TLRPC.Message message : source.buffer) {
-                if (message.id > source.readMax) {
-                    return false;
+            if (response instanceof TLRPC.messages_Messages) {
+                TLRPC.messages_Messages res = (TLRPC.messages_Messages) response;
+                putUsersAndChats(res);
+                TLRPC.Message outermost = null;
+                int count = 0;
+                for (TLRPC.Message message : res.messages) {
+                    if (!isFromSource(message, source)) {
+                        continue;
+                    }
+                    if (newer ? message.id <= edge.offsetId : (edge.offsetId != 0 && message.id >= edge.offsetId)) {
+                        continue;
+                    }
+                    count++;
+                    if (outermost == null || (newer ? message.id > outermost.id : message.id < outermost.id)) {
+                        outermost = message;
+                    }
+                    if (isPost(message, source) && source.seen.add(message.id)) {
+                        edge.buffer.add(message);
+                    }
                 }
+                if (newer) {
+                    sortOldestFirst(edge.buffer);
+                } else {
+                    sortNewestFirst(edge.buffer);
+                }
+                if (outermost == null) {
+                    edge.exhausted = true;
+                } else {
+                    edge.offsetId = outermost.id;
+                    edge.frontier = outermost.date;
+                    // A newer window holds FETCH_LIMIT - 1 new posts when the offset post still exists.
+                    if (count < (newer ? FETCH_LIMIT - 1 : FETCH_LIMIT)) {
+                        edge.exhausted = true;
+                    }
+                }
+            } else if (!scheduleRetry(session, error, () -> edge.retries++ < MAX_RETRIES, () -> edge.inFlight = true, () -> edge.inFlight = false)) {
+                edge.exhausted = true;
+            } else {
+                return;
             }
-        }
-        return true;
+            pump(session);
+        }));
     }
 
-    private boolean noMoreToFetch(Session session) {
+    /** Removes and returns every buffered post of the given edge that can be shown now, newest first. */
+    private ArrayList<TLRPC.Message> collectReady(Session session, boolean newer) {
+        // Older edge: no channel can have unfetched posts newer than the highest older frontier.
+        // Newer edge: no channel can have unfetched posts older than the lowest newer frontier.
+        int watermark = newer ? Integer.MAX_VALUE : 0;
         for (Source source : session.sources) {
-            if (!source.exhausted) {
-                return false;
+            Edge edge = newer ? source.newer : source.older;
+            if (!edge.exhausted) {
+                watermark = newer ? Math.min(watermark, edge.frontier) : Math.max(watermark, edge.frontier);
             }
         }
-        return true;
-    }
-
-    /** Date watermark: posts not older than it can be shown, no channel can have newer unfetched posts. */
-    private int watermark(Session session) {
-        int watermark = 0;
-        for (Source source : session.sources) {
-            if (!source.exhausted) {
-                watermark = Math.max(watermark, source.frontier);
-            }
-        }
-        return watermark;
-    }
-
-    /** Removes and returns every buffered post that can be shown now, newest first. */
-    private ArrayList<TLRPC.Message> collectReady(Session session) {
-        int watermark = watermark(session);
         ArrayList<TLRPC.Message> ready = new ArrayList<>();
         for (Source source : session.sources) {
-            Iterator<TLRPC.Message> iterator = source.buffer.iterator();
+            Iterator<TLRPC.Message> iterator = (newer ? source.newer : source.older).buffer.iterator();
             while (iterator.hasNext()) {
                 TLRPC.Message message = iterator.next();
-                if (message.date >= watermark) {
+                if (newer ? message.date <= watermark : message.date >= watermark) {
                     ready.add(message);
                     iterator.remove();
                 } else {
@@ -408,20 +780,113 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
         return ready;
     }
 
-    private void restoreToBuffers(Session session, ArrayList<TLRPC.Message> messages) {
-        for (int i = messages.size() - 1; i >= 0; i--) {
-            TLRPC.Message message = messages.get(i);
-            long dialogId = MessageObject.getDialogId(message);
-            for (Source source : session.sources) {
-                if (source.dialogId == dialogId) {
-                    source.buffer.add(0, message);
-                    break;
-                }
+    private void restoreToBuffers(Session session, ArrayList<TLRPC.Message> messages, boolean newer) {
+        for (TLRPC.Message message : messages) {
+            Source source = findSource(session, MessageObject.getDialogId(message));
+            if (source != null) {
+                (newer ? source.newer : source.older).buffer.add(message);
             }
         }
         for (Source source : session.sources) {
-            sortNewestFirst(source.buffer);
+            if (newer) {
+                sortOldestFirst(source.newer.buffer);
+            } else {
+                sortNewestFirst(source.older.buffer);
+            }
         }
+    }
+
+    private void emitEdge(Session session, boolean newer, ArrayList<TLRPC.Message> ready) {
+        // ready is newest first. Older pages continue downwards from nextOlderId, newer pages upwards.
+        int n = ready.size();
+        ArrayList<MessageObject> messageObjects = new ArrayList<>(n);
+        int firstId = newer ? session.nextNewerId + n - 1 : session.nextOlderId;
+        for (int i = 0; i < n; i++) {
+            messageObjects.add(toMessageObject(ready.get(i), firstId - i));
+        }
+        if (newer) {
+            session.nextNewerId += n;
+            session.loadingNewer = false;
+        } else {
+            session.nextOlderId -= n;
+            session.loadingOlder = false;
+        }
+        final boolean wasInitial = session.initialPending;
+        session.initialPending = false;
+        final boolean olderEnd = !hasMore(session, false);
+        final boolean newerEnd = !hasMore(session, true);
+        final int loadIndex = newer ? session.newerLoadIndex : session.olderLoadIndex;
+        AndroidUtilities.runOnUIThread(() -> {
+            if (sessions.get(session.guid) != session) {
+                return;
+            }
+            if (newer) {
+                // load_type 1: a count different from the page size tells ChatActivity the newest post was reached.
+                NotificationCenter.getInstance(currentAccount).postNotificationName(NotificationCenter.messagesDidLoad,
+                        0L, newerEnd ? messageObjects.size() + 1 : messageObjects.size(), messageObjects, false, 0, 0, 0, 0, 1, false,
+                        session.guid, loadIndex, 0, 0, ChatActivity.MODE_FOLDER_FEED);
+            } else {
+                NotificationCenter.getInstance(currentAccount).postNotificationName(NotificationCenter.messagesDidLoad,
+                        0L, messageObjects.size(), messageObjects, false, 0, 0, 0, 0, 2, olderEnd,
+                        session.guid, loadIndex, 0, 0, ChatActivity.MODE_FOLDER_FEED);
+            }
+            NotificationCenter.getInstance(currentAccount).postNotificationName(NotificationCenter.cgFolderFeedLoaded,
+                    session.guid, olderEnd, newer ? LOADED_NEWER : (wasInitial ? LOADED_INITIAL : LOADED_OLDER), newerEnd);
+        });
+    }
+
+    // --- helpers ---
+
+    private MessageObject toMessageObject(TLRPC.Message message, int syntheticId) {
+        // SEARCH_PUBLIC_POSTS makes the cell draw the channel avatar and the "go to post" side button.
+        MessageObject messageObject = new MessageObject(currentAccount, message, null, null, null, null, null, true, true, 0, false, false, false, ChatActivity.SEARCH_PUBLIC_POSTS);
+        messageObject.isFolderFeedMessage = true;
+        message.realId = message.id;
+        message.id = syntheticId;
+        return messageObject;
+    }
+
+    private static boolean isFromSource(TLRPC.Message message, Source source) {
+        return message != null && !(message instanceof TLRPC.TL_messageEmpty) && MessageObject.getDialogId(message) == source.dialogId;
+    }
+
+    /** A post shown in the feed: from this channel and not a service message. */
+    private static boolean isPost(TLRPC.Message message, Source source) {
+        return isFromSource(message, source) && !(message instanceof TLRPC.TL_messageService);
+    }
+
+    private void putUsersAndChats(TLRPC.messages_Messages res) {
+        MessagesController.getInstance(currentAccount).putUsers(res.users, false);
+        MessagesController.getInstance(currentAccount).putChats(res.chats, false);
+        MessagesStorage.getInstance(currentAccount).putUsersAndChats(res.users, res.chats, true, true);
+    }
+
+    /**
+     * Schedules a retry of a failed request (FLOOD_WAIT aware). Returns false when retries are used up.
+     * A FLOOD_WAIT also lowers the parallelism for the rest of the controller's life.
+     */
+    private boolean scheduleRetry(Session session, TLRPC.TL_error error, Utilities.Callback0Return<Boolean> canRetry, Runnable markInFlight, Runnable clearInFlight) {
+        if (error != null) {
+            FileLog.e("FolderFeed: getHistory failed: " + error.text);
+        }
+        if (!canRetry.run()) {
+            return false;
+        }
+        int delay = 1000;
+        if (error != null && error.text != null && error.text.startsWith("FLOOD_WAIT_")) {
+            maxParallel = FLOOD_PARALLEL_REQUESTS;
+            try {
+                delay = Math.max(delay, Integer.parseInt(error.text.substring("FLOOD_WAIT_".length())) * 1000);
+            } catch (NumberFormatException ignore) {
+            }
+        }
+        // Keep the slot occupied while waiting, so pump() does not start the same request again.
+        markInFlight.run();
+        AndroidUtilities.runOnUIThread(() -> {
+            clearInFlight.run();
+            pump(session);
+        }, Math.min(delay, 30_000));
+        return true;
     }
 
     private static Source findSource(Session session, long dialogId) {
@@ -446,127 +911,9 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
         });
     }
 
-    private void fetch(Session session, Source source) {
-        TLRPC.TL_messages_getHistory req = new TLRPC.TL_messages_getHistory();
-        req.peer = source.peer;
-        req.offset_id = source.offsetId;
-        final int limit = session.firstLoad && source.unreadCount >= FETCH_LIMIT ? Math.min(MAX_FETCH_LIMIT, source.unreadCount + 1) : FETCH_LIMIT;
-        req.limit = limit;
-        source.inFlight = true;
-        source.reqId = ConnectionsManager.getInstance(currentAccount).sendRequest(req, (response, error) -> AndroidUtilities.runOnUIThread(() -> {
-            source.inFlight = false;
-            if (sessions.get(session.guid) != session) {
-                return;
-            }
-            if (response instanceof TLRPC.messages_Messages) {
-                TLRPC.messages_Messages res = (TLRPC.messages_Messages) response;
-                MessagesController.getInstance(currentAccount).putUsers(res.users, false);
-                MessagesController.getInstance(currentAccount).putChats(res.chats, false);
-                MessagesStorage.getInstance(currentAccount).putUsersAndChats(res.users, res.chats, true, true);
-                if (res.messages.isEmpty()) {
-                    source.exhausted = true;
-                } else {
-                    TLRPC.Message oldest = null;
-                    for (TLRPC.Message message : res.messages) {
-                        if (message == null || message instanceof TLRPC.TL_messageEmpty || MessageObject.getDialogId(message) != source.dialogId) {
-                            continue;
-                        }
-                        if (oldest == null || message.id < oldest.id) {
-                            oldest = message;
-                        }
-                        if (message instanceof TLRPC.TL_messageService) {
-                            continue;
-                        }
-                        source.buffer.add(message);
-                    }
-                    sortNewestFirst(source.buffer);
-                    if (oldest == null) {
-                        source.exhausted = true;
-                    } else {
-                        source.offsetId = oldest.id;
-                        source.frontier = oldest.date;
-                        if (res.messages.size() < limit) {
-                            source.exhausted = true;
-                        }
-                    }
-                }
-            } else {
-                if (error != null) {
-                    FileLog.e("FolderFeed: getHistory failed for " + source.dialogId + ": " + error.text);
-                }
-                if (source.retries < MAX_RETRIES) {
-                    // Transient failures (e.g. FLOOD_WAIT): retry the same page later instead of dropping the channel.
-                    source.retries++;
-                    int delay = 1000 * source.retries;
-                    if (error != null && error.text != null && error.text.startsWith("FLOOD_WAIT_")) {
-                        try {
-                            delay = Math.max(delay, Integer.parseInt(error.text.substring("FLOOD_WAIT_".length())) * 1000);
-                        } catch (NumberFormatException ignore) {
-                        }
-                    }
-                    source.inFlight = true;
-                    AndroidUtilities.runOnUIThread(() -> {
-                        source.inFlight = false;
-                        if (sessions.get(session.guid) == session) {
-                            process(session);
-                        }
-                    }, Math.min(delay, 30_000));
-                    return;
-                }
-                source.exhausted = true;
-            }
-            process(session);
-        }));
-    }
-
-    private void emit(Session session, ArrayList<TLRPC.Message> ready) {
-        ArrayList<MessageObject> messageObjects = new ArrayList<>(ready.size());
-        // On the first page, find the oldest unread post: ChatActivity scrolls there and shows the
-        // "Unread messages" separator, exactly as for a channel's first unread message.
-        int firstUnreadId = 0;
-        int unreadCount = 0;
-        final boolean firstLoad = session.firstLoad;
-        session.firstLoad = false;
-        for (TLRPC.Message message : ready) {
-            // SEARCH_PUBLIC_POSTS makes the cell draw the channel avatar and the "go to post" side button.
-            MessageObject messageObject = new MessageObject(currentAccount, message, null, null, null, null, null, true, true, 0, false, false, false, ChatActivity.SEARCH_PUBLIC_POSTS);
-            messageObject.isFolderFeedMessage = true;
-            message.realId = message.id;
-            message.id = session.nextGeneratedId--;
-            messageObjects.add(messageObject);
-            if (firstLoad) {
-                Source source = findSource(session, MessageObject.getDialogId(message));
-                if (source != null && source.unreadCount > 0 && message.realId > source.readMax) {
-                    firstUnreadId = message.id;
-                    unreadCount++;
-                }
-            }
-        }
-        boolean hasMore = false;
-        for (Source source : session.sources) {
-            if (!source.exhausted || !source.buffer.isEmpty()) {
-                hasMore = true;
-                break;
-            }
-        }
-        session.loading = false;
-        session.endReached = !hasMore;
-        final int loadIndex = session.pendingLoadIndex;
-        final boolean endReached = session.endReached;
-        final int fnid = firstUnreadId;
-        // Always asynchronous, like regular history loads: loadMore() may be called from scroll callbacks.
-        AndroidUtilities.runOnUIThread(() -> {
-            if (sessions.get(session.guid) != session) {
-                return;
-            }
-            NotificationCenter.getInstance(currentAccount).postNotificationName(NotificationCenter.messagesDidLoad,
-                    // The unread count is not passed (args[6] = 0): the feed shows it on its own
-                    // "next unread" button, while jump-to-bottom stays a plain jump to the newest post.
-                    0L, messageObjects.size(), messageObjects, false, fnid, 0, 0, 0, 2, endReached,
-                    session.guid, loadIndex, 0, 0, ChatActivity.MODE_FOLDER_FEED);
-            NotificationCenter.getInstance(currentAccount).postNotificationName(NotificationCenter.cgFolderFeedLoaded,
-                    session.guid, endReached);
-        });
+    private static void sortOldestFirst(ArrayList<TLRPC.Message> messages) {
+        sortNewestFirst(messages);
+        Collections.reverse(messages);
     }
 
     /**
@@ -653,6 +1000,11 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
             for (int i = 0; i < sessions.size(); i++) {
                 Session session = sessions.valueAt(i);
                 if (session.dialogIds.contains(dialogId)) {
+                    Source source = findSource(session, dialogId);
+                    if (source != null && source.newer.offsetId != 0) {
+                        // Opened away from the newest posts: the new ones arrive through forward paging.
+                        source.newer.exhausted = false;
+                    }
                     NotificationCenter.getInstance(currentAccount).postNotificationName(NotificationCenter.cgFolderFeedNewPosts, session.guid, count);
                 }
             }
