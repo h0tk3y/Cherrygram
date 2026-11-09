@@ -48988,8 +48988,7 @@ public class ChatActivity extends BaseFragment implements
         for (int i = 0, n = maxVisibleIds.size(); i < n; i++) {
             long did = maxVisibleIds.keyAt(i);
             int maxId = maxVisibleIds.valueAt(i);
-            TLRPC.Dialog dialog = getMessagesController().dialogs_dict.get(did);
-            int readMax = Math.max(dialog != null ? dialog.read_inbox_max_id : 0, folderFeedReadMax.get(did, 0));
+            int readMax = getFolderFeedReadMax(did);
             if (maxId <= readMax) {
                 continue;
             }
@@ -49124,10 +49123,19 @@ public class ChatActivity extends BaseFragment implements
         if (messageObject == null || !messageObject.isFolderFeedMessage) {
             return false;
         }
-        long did = messageObject.getDialogId();
+        return messageObject.getRealId() > getFolderFeedReadMax(messageObject.getDialogId());
+    }
+
+    /**
+     * The channel's read pointer as known locally. Reading only updates dialogs_read_inbox_max (and the
+     * unread count) right away; dialog.read_inbox_max_id catches up later, so both are needed, or posts
+     * read in an earlier visit look unread again and get counted off the unread count a second time.
+     */
+    private int getFolderFeedReadMax(long did) {
         TLRPC.Dialog dialog = getMessagesController().dialogs_dict.get(did);
-        int readMax = Math.max(dialog != null ? dialog.read_inbox_max_id : 0, folderFeedReadMax.get(did, 0));
-        return messageObject.getRealId() > readMax;
+        Integer localReadMax = getMessagesController().dialogs_read_inbox_max.get(did);
+        int readMax = Math.max(dialog != null ? dialog.read_inbox_max_id : 0, localReadMax != null ? localReadMax : 0);
+        return Math.max(readMax, folderFeedReadMax.get(did, 0));
     }
 
     /**
