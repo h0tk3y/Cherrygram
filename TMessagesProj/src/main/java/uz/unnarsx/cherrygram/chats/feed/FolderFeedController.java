@@ -294,8 +294,11 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
         final ArrayList<Source> sources = new ArrayList<>();
         final HashSet<Long> dialogIds = new HashSet<>();
         int state;
-        /** Date of the oldest first-unread post across the channels; the feed opens there. */
+        /** Date the feed opens at: the oldest first-unread post across the channels, or a saved position. */
         int anchorDate;
+        /** Saved position to restore (channel and real id of the post), or 0 to open at the first unread. */
+        long restoreDialogId;
+        int restoreMessageId;
         int nextOlderId = ID_BASE;
         int nextNewerId = ID_BASE + 1;
         boolean initialPending = true;
@@ -312,12 +315,12 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
     }
 
     /**
-     * Starts (or restarts) the feed displayed by the ChatActivity with the given classGuid. Unless
-     * {@code atLatest} is set, it opens at the oldest unread post across the channels, like a channel
-     * opens at its first unread post, loading every channel around that time; otherwise (or when nothing
-     * is unread) it opens at the newest posts.
+     * Starts (or restarts) the feed displayed by the ChatActivity with the given classGuid. Like a channel,
+     * it opens at the saved position if one is given (the post's channel, real id and date), else at the
+     * oldest unread post across the channels, loading every channel around that time; with {@code atLatest}
+     * set, or when nothing is unread, it opens at the newest posts.
      */
-    public void start(int guid, int filterId, int loadIndex, boolean atLatest) {
+    public void start(int guid, int filterId, int loadIndex, boolean atLatest, long restoreDialogId, int restoreMessageId, int restoreDate) {
         stop(guid);
         Session session = new Session(guid, filterId);
         session.initialLoadIndex = loadIndex;
@@ -343,7 +346,12 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
         }
         sessions.put(guid, session);
         updateObserving();
-        if (atLatest || !anyUnread) {
+        if (!atLatest && restoreDate > 0 && session.dialogIds.contains(restoreDialogId)) {
+            session.restoreDialogId = restoreDialogId;
+            session.restoreMessageId = restoreMessageId;
+            session.anchorDate = restoreDate;
+            session.state = STATE_AROUND;
+        } else if (atLatest || !anyUnread) {
             startAtLatest(session);
         } else {
             session.state = STATE_PROBING;
@@ -655,15 +663,27 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
         session.nextNewerId = ID_BASE + n;
         ArrayList<MessageObject> messageObjects = new ArrayList<>(n);
         int firstUnreadId = 0;
+        int restoreId = 0;
+        boolean restoreExact = false;
         for (int i = 0; i < n; i++) {
             TLRPC.Message message = all.get(i);
             MessageObject messageObject = toMessageObject(message, ID_BASE + n - 1 - i);
             messageObjects.add(messageObject);
-            Source source = findSource(session, MessageObject.getDialogId(message));
-            if (source != null && source.hasUnread() && message.realId > source.readMax) {
+            long dialogId = MessageObject.getDialogId(message);
+            Source source = findSource(session, dialogId);
+            if (session.restoreDialogId != 0) {
+                // The saved post, or if it is gone, the oldest post at or after its time.
+                if (dialogId == session.restoreDialogId && message.realId == session.restoreMessageId) {
+                    restoreId = message.id;
+                    restoreExact = true;
+                } else if (!restoreExact && message.date >= session.anchorDate) {
+                    restoreId = message.id;
+                }
+            } else if (source != null && source.hasUnread() && message.realId > source.readMax) {
                 firstUnreadId = message.id;
             }
         }
+        final int restoreMessageId = restoreId;
         session.initialPending = false;
         boolean olderEnd = !hasMore(session, false);
         boolean newerEnd = !hasMore(session, true);
@@ -678,8 +698,9 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
             NotificationCenter.getInstance(currentAccount).postNotificationName(NotificationCenter.messagesDidLoad,
                     0L, messageObjects.size(), messageObjects, false, fnid, newerEnd ? 0 : Integer.MIN_VALUE, 0, 0, 2, olderEnd,
                     session.guid, loadIndex, 0, 0, ChatActivity.MODE_FOLDER_FEED);
+            // A restored position is applied by ChatActivity before the first layout (args[4]).
             NotificationCenter.getInstance(currentAccount).postNotificationName(NotificationCenter.cgFolderFeedLoaded,
-                    session.guid, olderEnd, LOADED_INITIAL, newerEnd);
+                    session.guid, olderEnd, LOADED_INITIAL, newerEnd, restoreMessageId);
         });
     }
 
@@ -876,7 +897,7 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
                         session.guid, loadIndex, 0, 0, ChatActivity.MODE_FOLDER_FEED);
             }
             NotificationCenter.getInstance(currentAccount).postNotificationName(NotificationCenter.cgFolderFeedLoaded,
-                    session.guid, olderEnd, newer ? LOADED_NEWER : (wasInitial ? LOADED_INITIAL : LOADED_OLDER), newerEnd);
+                    session.guid, olderEnd, newer ? LOADED_NEWER : (wasInitial ? LOADED_INITIAL : LOADED_OLDER), newerEnd, 0);
         });
     }
 

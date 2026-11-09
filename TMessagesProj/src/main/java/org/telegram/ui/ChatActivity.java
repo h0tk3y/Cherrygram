@@ -724,6 +724,8 @@ public class ChatActivity extends BaseFragment implements
     private int folderFeedNextUnreadLoads;
     /** The "next unread" button requested a newer page and continues when it arrives. */
     private boolean folderFeedWaitingNextUnread;
+    /** Offset of the saved post being restored, as in a channel's "diditemo"; MAX_VALUE when none. */
+    private int folderFeedRestoreOffset = Integer.MAX_VALUE;
     private static final int MAX_FOLDER_FEED_NEXT_UNREAD_LOADS = 10;
 
     public static final int SEARCH_THIS_CHAT = 0;
@@ -3457,7 +3459,27 @@ public class ChatActivity extends BaseFragment implements
             if (chatMode == MODE_SEARCH) {
                 HashtagSearchController.getInstance(currentAccount).searchHashtag(searchingHashtag, classGuid, searchType, lastLoadIndex++);
             } else if (chatMode == MODE_FOLDER_FEED) {
-                FolderFeedController.getInstance(currentAccount).start(classGuid, folderFeedFilterId, lastLoadIndex++, folderFeedOpenAtLatest);
+                long restoreDialogId = 0;
+                int restoreMessageId = 0, restoreDate = 0;
+                folderFeedRestoreOffset = Integer.MAX_VALUE;
+                if (!folderFeedOpenAtLatest) {
+                    // Saved position, like a channel's "diditem": channel:realId:date:offset.
+                    String saved = MessagesController.getNotificationsSettings(currentAccount).getString(getFolderFeedPositionKey(), null);
+                    if (saved != null) {
+                        try {
+                            String[] parts = saved.split(":");
+                            restoreDialogId = Long.parseLong(parts[0]);
+                            restoreMessageId = Integer.parseInt(parts[1]);
+                            restoreDate = Integer.parseInt(parts[2]);
+                            folderFeedRestoreOffset = Integer.parseInt(parts[3]);
+                        } catch (Exception e) {
+                            FileLog.e(e);
+                            restoreDialogId = 0;
+                            restoreDate = 0;
+                        }
+                    }
+                }
+                FolderFeedController.getInstance(currentAccount).start(classGuid, folderFeedFilterId, lastLoadIndex++, folderFeedOpenAtLatest, restoreDialogId, restoreMessageId, restoreDate);
                 folderFeedOpenAtLatest = false;
             } else if (startLoadFromDate != 0) {
                 getMessagesController().loadMessages(dialog_id, mergeDialogId, false, 30, 0, startLoadFromDate, true, 0, classGuid, 4, 0, chatMode, threadMessageId, replyMaxReadId, lastLoadIndex++, isTopic);
@@ -30916,6 +30938,9 @@ public class ChatActivity extends BaseFragment implements
             saveDraft();
             getMessagesController().cancelTyping(0, dialog_id, threadMessageId);
         }
+        if (chatMode == MODE_FOLDER_FEED) {
+            saveFolderFeedPosition();
+        }
         if (chatMode == 0 || chatMode == MODE_SAVED) {
             if (!pausedOnLastMessage && !firstLoading && (!isThreadChat() || isTopic)) {
                 SharedPreferences.Editor editor = MessagesController.getNotificationsSettings(currentAccount).edit();
@@ -48897,6 +48922,9 @@ public class ChatActivity extends BaseFragment implements
                     chatAdapter.updateRowsSafe();
                 }
             }
+            if (direction == FolderFeedController.LOADED_INITIAL) {
+                restoreFolderFeedPosition((Integer) args[4]);
+            }
             updateFolderFeedUnreadButton(true);
             if (direction == FolderFeedController.LOADED_NEWER && folderFeedWaitingNextUnread) {
                 // The "next unread" button is waiting for a newer page.
@@ -48989,6 +49017,85 @@ public class ChatActivity extends BaseFragment implements
         if (markedAny) {
             updateFolderFeedUnreadButton(true);
         }
+    }
+
+    private String getFolderFeedPositionKey() {
+        return "cg_feeditem_" + folderFeedFilterId;
+    }
+
+    /**
+     * Saves the scroll position like a channel does on leaving: the bottom-most visible post and its
+     * offset, unless the newest post is on screen or that post is still unread, in which case the feed
+     * opens at the first unread post (or the newest one) next time.
+     */
+    private void saveFolderFeedPosition() {
+        if (firstLoading || chatListView == null || chatLayoutManager == null || messages.isEmpty()) {
+            return;
+        }
+        ChatMessageCell bottomCell = null;
+        final int listHeight = chatListView.getMeasuredHeight();
+        for (int i = 0, n = chatListView.getChildCount(); i < n; i++) {
+            View child = chatListView.getChildAt(i);
+            if (!(child instanceof ChatMessageCell) || child.getTop() >= listHeight - chatListView.getPaddingBottom()) {
+                continue;
+            }
+            MessageObject messageObject = ((ChatMessageCell) child).getMessageObject();
+            if (messageObject == null || !messageObject.isFolderFeedMessage) {
+                continue;
+            }
+            if (bottomCell == null || child.getBottom() > bottomCell.getBottom()) {
+                bottomCell = (ChatMessageCell) child;
+            }
+        }
+        SharedPreferences.Editor editor = MessagesController.getNotificationsSettings(currentAccount).edit();
+        MessageObject anchor = bottomCell != null ? bottomCell.getMessageObject() : null;
+        boolean atNewest = false;
+        if (anchor != null && forwardEndReached[0]) {
+            atNewest = true;
+            for (int a = 0, size = messages.size(); a < size; a++) {
+                MessageObject messageObject = messages.get(a);
+                if (messageObject == anchor) {
+                    break;
+                }
+                // A newer post below it (other than the rest of its album): not at the bottom.
+                if (messageObject.isFolderFeedMessage && (anchor.getGroupId() == 0 || messageObject.getGroupId() != anchor.getGroupId())) {
+                    atNewest = false;
+                    break;
+                }
+            }
+        }
+        if (anchor == null || atNewest || isFolderFeedUnread(anchor)) {
+            editor.remove(getFolderFeedPositionKey());
+        } else {
+            int offset = bottomCell.getBottom() - listHeight;
+            editor.putString(getFolderFeedPositionKey(), anchor.getDialogId() + ":" + anchor.getRealId() + ":" + anchor.messageOwner.date + ":" + offset);
+        }
+        editor.apply();
+    }
+
+    /** Scrolls to the restored saved post before the first layout, the way a channel restores its position. */
+    private void restoreFolderFeedPosition(int messageId) {
+        int offset = folderFeedRestoreOffset;
+        folderFeedRestoreOffset = Integer.MAX_VALUE;
+        if (messageId == 0 || offset == Integer.MAX_VALUE || chatAdapter == null || chatLayoutManager == null) {
+            return;
+        }
+        int index = -1;
+        for (int a = 0, size = messages.size(); a < size; a++) {
+            if (messages.get(a).getId() == messageId) {
+                index = a;
+                break;
+            }
+        }
+        if (index < 0) {
+            return;
+        }
+        chatAdapter.updateRowsSafe();
+        // Same arithmetic as the channel restore in didReceivedNotification_messagesDidLoad.
+        int yOffset = -offset - chatListView.getPaddingBottom() + AndroidUtilities.dp(50);
+        chatLayoutManager.scrollToPositionWithOffset(chatAdapter.messagesStartRow + index, yOffset, true);
+        canShowPagedownButton = true;
+        updatePagedownButtonVisibility(true);
     }
 
     private boolean isNewestLoadedFolderFeedPost(long did, int realId) {
