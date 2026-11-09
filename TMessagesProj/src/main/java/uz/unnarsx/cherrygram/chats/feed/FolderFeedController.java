@@ -22,7 +22,6 @@ import org.telegram.messenger.MessagesController;
 import org.telegram.messenger.MessagesStorage;
 import org.telegram.messenger.NotificationCenter;
 import org.telegram.messenger.UserConfig;
-import org.telegram.messenger.Utilities;
 import org.telegram.tgnet.ConnectionsManager;
 import org.telegram.tgnet.SerializedData;
 import org.telegram.tgnet.TLRPC;
@@ -75,7 +74,6 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
      */
     private static final int MAX_PARALLEL_REQUESTS = 8;
     private static final int FLOOD_PARALLEL_REQUESTS = 2;
-    private static final int MAX_RETRIES = 3;
     private static final long CHANNELS_CACHE_MS = 1000;
 
     private static final FolderFeedController[] Instance = new FolderFeedController[UserConfig.MAX_ACCOUNT_COUNT];
@@ -264,6 +262,9 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
         boolean requestInFlight;
         int requestId;
         int requestRetries;
+        /** Bumped when the channel gets a new post, so a newer-edge response built before it does not
+         *  mark the edge as exhausted for good. */
+        int liveVersion;
 
         Source(long dialogId, TLRPC.InputPeer peer) {
             this.dialogId = dialogId;
@@ -401,6 +402,19 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
         return session != null && (session.initialPending || session.loadingOlder || session.loadingNewer);
     }
 
+    /**
+     * Newest message id (service messages included) fetched for the channel, when nothing newer is left
+     * to load or show; 0 otherwise. Reading a channel up to it reads nothing the feed has not shown.
+     */
+    public int getNewestFetchedId(int guid, long dialogId) {
+        Session session = sessions.get(guid);
+        Source source = session != null ? findSource(session, dialogId) : null;
+        if (source == null || !source.newer.exhausted || !source.newer.buffer.isEmpty() || source.newer.inFlight) {
+            return 0;
+        }
+        return source.newer.offsetId;
+    }
+
     public int getChannelsCount(int guid) {
         Session session = sessions.get(guid);
         return session == null ? 0 : session.sources.size();
@@ -536,7 +550,8 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
                 }
                 source.firstUnreadDate = first != null ? first.date : 0;
                 source.probeDone = true;
-            } else if (!scheduleRetry(session, error, () -> source.requestRetries++ < MAX_RETRIES, () -> source.requestInFlight = true, () -> source.requestInFlight = false)) {
+                source.requestRetries = 0;
+            } else if (!scheduleRetry(session, error, ++source.requestRetries, () -> source.requestInFlight = true, () -> source.requestInFlight = false)) {
                 source.probeDone = true;
             } else {
                 return;
@@ -552,6 +567,7 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
         req.offset_date = session.anchorDate;
         req.add_offset = -AROUND_NEWER;
         req.limit = AROUND_NEWER + AROUND_OLDER;
+        final int liveVersion = source.liveVersion;
         source.requestInFlight = true;
         source.requestId = ConnectionsManager.getInstance(currentAccount).sendRequest(req, (response, error) -> AndroidUtilities.runOnUIThread(() -> {
             source.requestInFlight = false;
@@ -561,12 +577,13 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
             if (response instanceof TLRPC.messages_Messages) {
                 TLRPC.messages_Messages res = (TLRPC.messages_Messages) response;
                 putUsersAndChats(res);
-                TLRPC.Message oldestOlder = null, newestNewer = null;
+                TLRPC.Message oldestOlder = null, newestNewer = null, newest = null;
                 int olderCount = 0, newerCount = 0;
                 for (TLRPC.Message message : res.messages) {
                     if (!isFromSource(message, source)) {
                         continue;
                     }
+                    if (newest == null || message.id > newest.id) newest = message;
                     boolean newer = message.date >= session.anchorDate;
                     if (newer) {
                         newerCount++;
@@ -589,19 +606,35 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
                 if (newestNewer != null) {
                     source.newer.offsetId = newestNewer.id;
                     source.newer.frontier = newestNewer.date;
+                } else {
+                    // Nothing at or after the anchor yet: newer posts, once they arrive, follow the newest one.
+                    setNewerStart(source, newest);
                 }
-                source.newer.exhausted = newerCount < AROUND_NEWER;
+                source.newer.exhausted = newerCount < AROUND_NEWER && source.liveVersion == liveVersion;
                 source.aroundDone = true;
-            } else if (!scheduleRetry(session, error, () -> source.requestRetries++ < MAX_RETRIES, () -> source.requestInFlight = true, () -> source.requestInFlight = false)) {
-                // Give up on this channel for the session rather than blocking the feed.
+                source.requestRetries = 0;
+            } else if (!scheduleRetry(session, error, ++source.requestRetries, () -> source.requestInFlight = true, () -> source.requestInFlight = false)) {
+                // The channel cannot be read (e.g. it became private): leave it out of the feed.
                 source.older.exhausted = true;
                 source.newer.exhausted = true;
+                setNewerStart(source, null);
                 source.aroundDone = true;
             } else {
                 return;
             }
             pump(session);
         }));
+    }
+
+    private void setNewerStart(Source source, TLRPC.Message newest) {
+        if (newest != null) {
+            source.newer.offsetId = newest.id;
+            source.newer.frontier = newest.date;
+        } else {
+            TLRPC.Dialog dialog = MessagesController.getInstance(currentAccount).dialogs_dict.get(source.dialogId);
+            source.newer.offsetId = dialog != null ? dialog.top_message : 0;
+            source.newer.frontier = dialog != null ? dialog.last_message_date : 0;
+        }
     }
 
     private void emitInitialAround(Session session) {
@@ -702,6 +735,7 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
         } else {
             req.limit = FETCH_LIMIT;
         }
+        final int liveVersion = source.liveVersion;
         edge.inFlight = true;
         edge.reqId = ConnectionsManager.getInstance(currentAccount).sendRequest(req, (response, error) -> AndroidUtilities.runOnUIThread(() -> {
             edge.inFlight = false;
@@ -733,6 +767,7 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
                 } else {
                     sortNewestFirst(edge.buffer);
                 }
+                edge.retries = 0;
                 if (outermost == null) {
                     edge.exhausted = true;
                 } else {
@@ -743,7 +778,11 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
                         edge.exhausted = true;
                     }
                 }
-            } else if (!scheduleRetry(session, error, () -> edge.retries++ < MAX_RETRIES, () -> edge.inFlight = true, () -> edge.inFlight = false)) {
+                if (newer && source.liveVersion != liveVersion) {
+                    // A post arrived after this response was built: there is more to load.
+                    edge.exhausted = false;
+                }
+            } else if (!scheduleRetry(session, error, ++edge.retries, () -> edge.inFlight = true, () -> edge.inFlight = false)) {
                 edge.exhausted = true;
             } else {
                 return;
@@ -862,21 +901,21 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
     }
 
     /**
-     * Schedules a retry of a failed request (FLOOD_WAIT aware). Returns false when retries are used up.
-     * A FLOOD_WAIT also lowers the parallelism for the rest of the controller's life.
+     * Schedules a retry of a failed request, unless the error is permanent (e.g. the channel became
+     * private). Transient failures are retried for as long as the feed is open, with a growing delay or
+     * the wait the server asks for; a FLOOD_WAIT also lowers the parallelism for the rest of the
+     * controller's life. Returns false when the request should be given up.
      */
-    private boolean scheduleRetry(Session session, TLRPC.TL_error error, Utilities.Callback0Return<Boolean> canRetry, Runnable markInFlight, Runnable clearInFlight) {
-        if (error != null) {
-            FileLog.e("FolderFeed: getHistory failed: " + error.text);
-        }
-        if (!canRetry.run()) {
+    private boolean scheduleRetry(Session session, TLRPC.TL_error error, int attempt, Runnable markInFlight, Runnable clearInFlight) {
+        FileLog.e("FolderFeed: getHistory failed: " + (error != null ? error.code + " " + error.text : "unexpected response"));
+        if (error == null || error.code == 400 || error.code == 403 || error.code == 406) {
             return false;
         }
-        int delay = 1000;
-        if (error != null && error.text != null && error.text.startsWith("FLOOD_WAIT_")) {
+        int delay = Math.min(1000 << Math.min(attempt - 1, 5), 30_000);
+        if (error.text != null && error.text.startsWith("FLOOD_WAIT_")) {
             maxParallel = FLOOD_PARALLEL_REQUESTS;
             try {
-                delay = Math.max(delay, Integer.parseInt(error.text.substring("FLOOD_WAIT_".length())) * 1000);
+                delay = Math.max(delay, Integer.parseInt(error.text.substring("FLOOD_WAIT_".length())) * 1000 + 500);
             } catch (NumberFormatException ignore) {
             }
         }
@@ -885,7 +924,7 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
         AndroidUtilities.runOnUIThread(() -> {
             clearInFlight.run();
             pump(session);
-        }, Math.min(delay, 30_000));
+        }, delay);
         return true;
     }
 
@@ -1001,9 +1040,12 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
                 Session session = sessions.valueAt(i);
                 if (session.dialogIds.contains(dialogId)) {
                     Source source = findSource(session, dialogId);
-                    if (source != null && source.newer.offsetId != 0) {
-                        // Opened away from the newest posts: the new ones arrive through forward paging.
-                        source.newer.exhausted = false;
+                    if (source != null) {
+                        source.liveVersion++;
+                        if (source.newer.offsetId != 0) {
+                            // Opened away from the newest posts: the new ones arrive through forward paging.
+                            source.newer.exhausted = false;
+                        }
                     }
                     NotificationCenter.getInstance(currentAccount).postNotificationName(NotificationCenter.cgFolderFeedNewPosts, session.guid, count);
                 }
