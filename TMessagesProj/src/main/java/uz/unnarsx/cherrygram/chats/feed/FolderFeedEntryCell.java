@@ -27,6 +27,7 @@ import org.telegram.messenger.MessagesController;
 import org.telegram.messenger.R;
 import org.telegram.ui.ActionBar.Theme;
 import org.telegram.ui.Components.CombinedDrawable;
+import org.telegram.ui.Components.CounterView;
 import org.telegram.ui.Components.LayoutHelper;
 
 /** Pinned "All channels" row shown on top of a folder's chat list; opens {@link FolderFeedActivity}. */
@@ -35,8 +36,10 @@ public class FolderFeedEntryCell extends FrameLayout {
     private final ImageView imageView;
     private final TextView titleView;
     private final TextView subtitleView;
+    private final CounterView counterView;
     private final Theme.ResourcesProvider resourcesProvider;
     private MessagesController.DialogFilter filter;
+    private int account;
 
     public FolderFeedEntryCell(Context context, Theme.ResourcesProvider resourcesProvider) {
         super(context);
@@ -60,7 +63,7 @@ public class FolderFeedEntryCell extends FrameLayout {
         titleView.setEllipsize(TextUtils.TruncateAt.END);
         titleView.setGravity(LocaleController.isRTL ? Gravity.RIGHT : Gravity.LEFT);
         titleView.setText(getString(R.string.CG_FolderFeed_Title));
-        addView(titleView, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT, Gravity.TOP | (LocaleController.isRTL ? Gravity.RIGHT : Gravity.LEFT), LocaleController.isRTL ? 16 : 76, 13, LocaleController.isRTL ? 76 : 16, 0));
+        addView(titleView, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT, Gravity.TOP | (LocaleController.isRTL ? Gravity.RIGHT : Gravity.LEFT), LocaleController.isRTL ? 72 : 76, 13, LocaleController.isRTL ? 76 : 72, 0));
 
         subtitleView = new TextView(context);
         subtitleView.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 15);
@@ -68,15 +71,36 @@ public class FolderFeedEntryCell extends FrameLayout {
         subtitleView.setSingleLine(true);
         subtitleView.setEllipsize(TextUtils.TruncateAt.END);
         subtitleView.setGravity(LocaleController.isRTL ? Gravity.RIGHT : Gravity.LEFT);
-        addView(subtitleView, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT, Gravity.TOP | (LocaleController.isRTL ? Gravity.RIGHT : Gravity.LEFT), LocaleController.isRTL ? 16 : 76, 39, LocaleController.isRTL ? 76 : 16, 0));
+        addView(subtitleView, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT, Gravity.TOP | (LocaleController.isRTL ? Gravity.RIGHT : Gravity.LEFT), LocaleController.isRTL ? 72 : 76, 39, LocaleController.isRTL ? 76 : 72, 0));
+
+        // Unread posts across the feed's channels, styled like a chat's unread badge.
+        counterView = new CounterView(context, resourcesProvider);
+        counterView.setColors(Theme.key_chats_unreadCounterText, Theme.key_chats_unreadCounter);
+        counterView.setGravity(LocaleController.isRTL ? Gravity.LEFT : Gravity.RIGHT);
+        counterView.counterDrawable.shortFormat = true;
+        addView(counterView, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, 28, Gravity.CENTER_VERTICAL, 14, 0, 14, 0));
 
         setBackground(Theme.getSelectorDrawable(false));
     }
 
     public void setFilter(int account, MessagesController.DialogFilter filter) {
+        boolean sameFilter = this.filter == filter;
         this.filter = filter;
+        this.account = account;
         int count = FolderFeedController.getFeedChannelsCount(account, filter);
         subtitleView.setText(LocaleController.formatString(R.string.CG_FolderFeed_EntrySubtitle, LocaleController.formatPluralString("CG_FolderFeed_ChannelsCount", count)));
+        updateUnreadCounter(sameFilter);
+    }
+
+    /** Refreshes the unread badge; called again by the dialogs list when read states change. */
+    public void updateUnreadCounter(boolean animated) {
+        if (filter == null) {
+            return;
+        }
+        int[] state = FolderFeedController.getFeedUnreadState(account, filter);
+        counterView.setColors(Theme.key_chats_unreadCounterText, state[1] != 0 ? Theme.key_chats_unreadCounter : Theme.key_chats_unreadCounterMuted);
+        counterView.setCount(state[0], animated);
+        counterView.invalidate();
     }
 
     public MessagesController.DialogFilter getFilter() {

@@ -11578,6 +11578,11 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
             int count = list.getChildCount();
             for (int a = 0; a < count; a++) {
                 View child = list.getChildAt(a);
+                if (child instanceof FolderFeedEntryCell) {
+                    // Cherrygram: keep the merged feed entry's unread badge in sync with read states.
+                    ((FolderFeedEntryCell) child).updateUnreadCounter(animated);
+                    continue;
+                }
                 if (child instanceof DialogCell) {
                     if (searchViewPager == null || list.getAdapter() != searchViewPager.dialogsSearchAdapter) {
                         DialogCell cell = (DialogCell) child;

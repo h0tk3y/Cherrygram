@@ -32,6 +32,7 @@ import java.util.Collections;
 import java.util.HashSet;
 import java.util.Iterator;
 
+import uz.unnarsx.cherrygram.core.configs.CherrygramAppearanceConfig;
 import uz.unnarsx.cherrygram.core.configs.CherrygramChatsConfig;
 
 /**
@@ -162,6 +163,33 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
      */
     private static boolean excludesReadChats(MessagesController.DialogFilter filter) {
         return (filter.flags & MessagesController.DIALOG_FILTER_FLAG_EXCLUDE_READ) != 0;
+    }
+
+    /**
+     * Unread posts across the folder's feed channels, for the pinned entry's counter: {count, 1 if any
+     * counted channel is unmuted else 0}. Muted channels are counted only when the folder-tab setting
+     * "include muted chats in counters" is on, matching the folder tabs.
+     */
+    public static int[] getFeedUnreadState(int account, @Nullable MessagesController.DialogFilter filter) {
+        boolean includeMuted = CherrygramAppearanceConfig.INSTANCE.getTabsIncludeMutedInCounter();
+        MessagesController controller = MessagesController.getInstance(account);
+        int count = 0;
+        boolean anyUnmuted = false;
+        for (TLRPC.Chat chat : getFeedChannels(account, filter)) {
+            TLRPC.Dialog dialog = controller.dialogs_dict.get(-chat.id);
+            if (dialog == null || dialog.unread_count <= 0) {
+                continue;
+            }
+            boolean muted = controller.isDialogMuted(dialog.id, 0);
+            if (muted && !includeMuted) {
+                continue;
+            }
+            count += dialog.unread_count;
+            if (!muted) {
+                anyUnmuted = true;
+            }
+        }
+        return new int[]{count, anyUnmuted ? 1 : 0};
     }
 
     @Nullable
