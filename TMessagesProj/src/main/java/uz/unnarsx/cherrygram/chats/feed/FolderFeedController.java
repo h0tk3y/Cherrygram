@@ -415,6 +415,12 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
         return source.newer.offsetId;
     }
 
+    /** Whether newer posts than the ones shown may be loaded, e.g. after new posts arrived. */
+    public boolean hasNewerPosts(int guid) {
+        Session session = sessions.get(guid);
+        return session != null && session.state == STATE_READY && hasMore(session, true);
+    }
+
     public int getChannelsCount(int guid) {
         Session session = sessions.get(guid);
         return session == null ? 0 : session.sources.size();
@@ -1042,8 +1048,22 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
                     Source source = findSource(session, dialogId);
                     if (source != null) {
                         source.liveVersion++;
+                        if (source.newer.offsetId == 0 && (source.aroundDone || session.state == STATE_READY)) {
+                            // Nothing was known of the channel: its history starts right before the new posts.
+                            int minId = Integer.MAX_VALUE, minDate = Integer.MAX_VALUE;
+                            for (MessageObject messageObject : messages) {
+                                if (messageObject != null && messageObject.getId() > 0) {
+                                    minId = Math.min(minId, messageObject.getId());
+                                    minDate = Math.min(minDate, messageObject.messageOwner.date);
+                                }
+                            }
+                            if (minId != Integer.MAX_VALUE) {
+                                source.newer.offsetId = minId - 1;
+                                source.newer.frontier = minDate;
+                            }
+                        }
                         if (source.newer.offsetId != 0) {
-                            // Opened away from the newest posts: the new ones arrive through forward paging.
+                            // The new posts arrive through forward paging, like scrolling down to newer posts.
                             source.newer.exhausted = false;
                         }
                     }

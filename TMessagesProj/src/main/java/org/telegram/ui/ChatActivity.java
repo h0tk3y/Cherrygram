@@ -717,8 +717,6 @@ public class ChatActivity extends BaseFragment implements
     /** Cherrygram: merged feed of every channel of a chat folder, see FolderFeedController. */
     public static final int MODE_FOLDER_FEED = 100;
     public int folderFeedFilterId;
-    private boolean folderFeedHasNewPosts;
-    private int folderFeedNewPostsCount;
     private int folderFeedUnreadCount;
     /** The next (re)load of the merged feed opens at the newest posts instead of the first unread one. */
     private boolean folderFeedOpenAtLatest;
@@ -7283,10 +7281,6 @@ public class ChatActivity extends BaseFragment implements
                         if (dy >= 0) {
                             canShowPagedownButton = false;
                             updatePagedownButtonVisibility(true);
-                            if (chatMode == MODE_FOLDER_FEED && folderFeedHasNewPosts && !loading) {
-                                // Scrolled down to the newest loaded post: show the posts that arrived meanwhile.
-                                AndroidUtilities.runOnUIThread(ChatActivity.this::reloadFolderFeed);
-                            }
                         }
                     } else {
                         final boolean isPageDownButtonVisible = sideControlsButtonsLayout.isButtonVisible(
@@ -11138,7 +11132,7 @@ public class ChatActivity extends BaseFragment implements
     private boolean forceScrollToMessageBottom;
 
     public void onPageDownClicked(boolean clearStack) {
-        if (chatMode == MODE_FOLDER_FEED && (folderFeedHasNewPosts || !forwardEndReached[0])) {
+        if (chatMode == MODE_FOLDER_FEED && !forwardEndReached[0]) {
             // The newest posts are not loaded (opened at the first unread post, or new posts arrived
             // while scrolled up): reload the merged feed at the newest post.
             reloadFolderFeed();
@@ -48912,33 +48906,26 @@ public class ChatActivity extends BaseFragment implements
                 AndroidUtilities.runOnUIThread(() -> checkScrollForLoad(false));
             }
         } else if (id == NotificationCenter.updateInterfaces) {
-            if (chatMode == MODE_FOLDER_FEED && (((Integer) args[0]) & MessagesController.UPDATE_MASK_READ_DIALOG_MESSAGE) != 0) {
+            if (chatMode == MODE_FOLDER_FEED && (((Integer) args[0]) & (MessagesController.UPDATE_MASK_READ_DIALOG_MESSAGE | MessagesController.UPDATE_MASK_NEW_MESSAGE)) != 0) {
                 updateFolderFeedUnreadButton(true);
             }
         } else if (id == NotificationCenter.cgFolderFeedNewPosts) {
             if ((Integer) args[0] != classGuid) {
                 return;
             }
-            if (!forwardEndReached[0]) {
-                // The newest posts are not loaded yet: the new ones arrive with the next newer page.
-                return;
-            }
-            folderFeedHasNewPosts = true;
-            folderFeedNewPostsCount += (Integer) args[1];
-            // Deferred: the dialog's last message date is updated after didReceiveNewMessages is posted.
-            AndroidUtilities.runOnUIThread(() -> {
-                if (!folderFeedHasNewPosts) {
-                    return;
+            // New posts load like scrolling down to newer ones: in place when near the bottom, otherwise
+            // when scrolling there. They are counted by the "next unread" button only.
+            if (forwardEndReached[0] && FolderFeedController.getInstance(currentAccount).hasNewerPosts(classGuid)) {
+                forwardEndReached[0] = false;
+                if (chatAdapter != null) {
+                    chatAdapter.updateRowsSafe();
                 }
-                if (chatLayoutManager != null && chatLayoutManager.findFirstVisibleItemPosition() <= 1 && !loading) {
-                    reloadFolderFeed();
-                } else if (sideControlsButtonsLayout != null) {
-                    // Like regular channels: the jump-to-bottom button shows how many new posts wait below.
+                if (chatLayoutManager != null && chatLayoutManager.findFirstVisibleItemPosition() > 1) {
                     canShowPagedownButton = true;
                     updatePagedownButtonVisibility(true);
-                    sideControlsButtonsLayout.setButtonCount(ChatActivitySideControlsButtonsLayout.BUTTON_PAGE_DOWN, folderFeedNewPostsCount, true);
                 }
-            });
+            }
+            AndroidUtilities.runOnUIThread(() -> checkScrollForLoad(false));
         }
     }
 
@@ -48989,7 +48976,7 @@ public class ChatActivity extends BaseFragment implements
                 }
             }
             int readTo = maxId;
-            if (forwardEndReached[0] && !folderFeedHasNewPosts && isNewestLoadedFolderFeedPost(did, maxId)) {
+            if (forwardEndReached[0] && isNewestLoadedFolderFeedPost(did, maxId)) {
                 // The channel's newest post is on screen: what was fetched after it are service messages,
                 // which the feed does not show, so read those too. Posts not fetched yet stay unread.
                 readTo = Math.max(maxId, FolderFeedController.getInstance(currentAccount).getNewestFetchedId(classGuid, did));
@@ -49113,8 +49100,6 @@ public class ChatActivity extends BaseFragment implements
         if (chatMode != MODE_FOLDER_FEED) {
             return;
         }
-        folderFeedHasNewPosts = false;
-        folderFeedNewPostsCount = 0;
         folderFeedNextUnreadLoads = 0;
         folderFeedWaitingNextUnread = false;
         folderFeedOpenAtLatest = true;
@@ -49122,7 +49107,6 @@ public class ChatActivity extends BaseFragment implements
         first_unread_id = 0;
         if (sideControlsButtonsLayout != null) {
             sideControlsButtonsLayout.setButtonLoading(ChatActivitySideControlsButtonsLayout.BUTTON_FEED_NEXT_UNREAD, false, false);
-            sideControlsButtonsLayout.setButtonCount(ChatActivitySideControlsButtonsLayout.BUTTON_PAGE_DOWN, 0, true);
             canShowPagedownButton = false;
             updatePagedownButtonVisibility(true);
         }
