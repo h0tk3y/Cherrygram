@@ -1,6 +1,6 @@
-# Builds an installable test APK of the merged folder channels feed branch and smoke-tests it on an
-# emulator. Not the official release pipeline: closed-source parts are replaced by stubs (see ci/),
-# and the APK is signed with a throwaway key (ci/ci-test-signing.jks).
+# Runs the folder feed's JVM unit tests, builds an installable test APK of the merged folder channels
+# feed branch and smoke-tests it on an emulator. Not the official release pipeline: closed-source parts
+# are replaced by stubs (see ci/), and the APK is signed with a throwaway key (ci/ci-test-signing.jks).
 #
 # Optional repository secrets:
 #   TG_APP_ID, TG_APP_HASH  your API id/hash from https://my.telegram.org, used by the APK. Without them
@@ -35,7 +35,35 @@ env:
   DEFAULT_TG_APP_HASH: 014b35b6184100b085b0d0572f9b5103
 
 jobs:
+  # Fast (about a minute): the feed's merge/paging core and cache logic on a plain JVM
+  # (TMessagesProj/src/test, ci/unit-tests/run.sh). The APK is only built and published if they pass.
+  unit-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Folder feed unit tests
+        run: |
+          set -o pipefail
+          ci/unit-tests/run.sh "$RUNNER_TEMP/feed-unit-tests" | tee "$RUNNER_TEMP/unit-tests.log"
+          {
+            echo "### Folder feed unit tests"
+            echo '```'
+            grep -E "^(Running|OK|Tests run|FAILURES)" "$RUNNER_TEMP/unit-tests.log"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
   build:
+    needs: unit-tests
     runs-on: ubuntu-latest
     timeout-minutes: 180
     permissions:
@@ -124,6 +152,25 @@ jobs:
           # GitHub release downloads, which fail from runners (HTTP 502/504).
           gradle --init-script ci/gradle-mirror.init.gradle :TMessagesProj_App:assembleAfatDebug -PAPP_PACKAGE=$APP_PACKAGE --stacktrace --no-daemon
           ccache -s || true
+
+      # The same unit tests as the unit-tests job, through the module's Gradle setup (src/test of
+      # TMessagesProj), so they keep working for anyone running them from the IDE or Gradle.
+      - name: Unit tests under Gradle
+        run: |
+          set -o pipefail
+          gradle --init-script ci/gradle-mirror.init.gradle :TMessagesProj:testDebugUnitTest --tests 'uz.unnarsx.cherrygram.chats.feed.*' -PAPP_PACKAGE=$APP_PACKAGE --no-daemon
+          python3 - <<'EOF' | tee -a "$GITHUB_STEP_SUMMARY"
+          import glob, xml.etree.ElementTree as ET
+          files = glob.glob("TMessagesProj/build/test-results/testDebugUnitTest/*.xml")
+          totals = [0, 0, 0, 0]
+          for f in files:
+              r = ET.parse(f).getroot()
+              for i, k in enumerate(("tests", "failures", "errors", "skipped")):
+                  totals[i] += int(r.get(k, 0))
+          print("Gradle unit tests: %d classes, %d tests, %d failures, %d errors, %d skipped" % (len(files), *totals))
+          if not files or totals[0] == 0 or totals[1] or totals[2]:
+              raise SystemExit("no tests ran, or tests failed")
+          EOF
 
       # Saved even when a later (Java/Kotlin) part of the build fails, so the slow native build is
       # reused, but not when the build never started.
