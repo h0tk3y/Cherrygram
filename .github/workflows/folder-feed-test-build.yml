@@ -91,7 +91,12 @@ jobs:
           SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
           yes | "$SDKMANAGER" --licenses > /dev/null
           "$SDKMANAGER" "platforms;android-36" "build-tools;36.0.0" "ndk;27.2.12479018" "cmake;3.22.1" > /dev/null
-          sudo apt-get update -qq && sudo apt-get install -y -qq ccache
+          # Retried: an Ubuntu mirror that does not resolve for a minute failed whole runs.
+          for attempt in 1 2 3 4; do
+            if sudo apt-get update -qq && sudo apt-get install -y -qq ccache; then break; fi
+            sleep $((attempt * 20))
+          done
+          command -v ccache
 
       - name: Restore ccache
         uses: actions/cache/restore@v4
