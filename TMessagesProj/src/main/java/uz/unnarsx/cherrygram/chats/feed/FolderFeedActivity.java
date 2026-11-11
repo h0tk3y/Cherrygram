@@ -94,8 +94,9 @@ public class FolderFeedActivity extends BaseFragment implements NotificationCent
             return;
         }
         if (id == NotificationCenter.cgFolderFeedProgress) {
-            // A large folder takes a while to open: show how many channels are loaded so far.
-            actionBar.setSubtitle(LocaleController.formatString(R.string.CG_FolderFeed_Loading, (Integer) args[1], (Integer) args[2]));
+            int done = (Integer) args[1];
+            // A large folder takes a while to open: show what is being loaded (-1: the chat list itself).
+            actionBar.setSubtitle(done < 0 ? getString(R.string.CG_FolderFeed_LoadingChats) : LocaleController.formatString(R.string.CG_FolderFeed_Loading, done, (Integer) args[2]));
         } else if (id == NotificationCenter.cgFolderFeedLoaded) {
             setChannelsSubtitle();
         }

@@ -110,6 +110,9 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
     private long floodCalmUntil;
     /** No new request is started before this time (elapsedRealtime): the server asked to wait. */
     private long floodPauseUntil;
+    /** Loading the rest of the chat list (main list / archive) for the feed. */
+    private boolean wantMainDialogs;
+    private boolean wantArchivedDialogs;
 
     private FolderFeedController(int account) {
         currentAccount = account;
@@ -291,6 +294,8 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
         boolean cacheAsked;
         boolean cacheHadPosts;
         boolean fromCache;
+        /** Why the last cached window was not used (CACHE_MISS_*), for the open stats. */
+        int cacheMiss;
 
         Source(long dialogId, TLRPC.InputPeer peer) {
             this.dialogId = dialogId;
@@ -309,6 +314,10 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
     private static final int STATE_PROBING = 0;
     private static final int STATE_AROUND = 1;
     private static final int STATE_READY = 2;
+    /** Waiting for the chat list to be complete before the folder's channels are known. */
+    private static final int STATE_WAITING_FOR_DIALOGS = 3;
+    /** A feed opens with the channels known by then even if the chat list is still loading. */
+    private static final long DIALOGS_WAIT_MS = 15_000;
 
     private static final int CACHE_NOT_READ = 0;
     private static final int CACHE_READING = 1;
@@ -324,6 +333,10 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
 
     private static class Session {
         final int guid;
+        int filterId;
+        boolean atLatest;
+        int restoreDate;
+        long dialogsWaitStarted;
         final ArrayList<Source> sources = new ArrayList<>();
         final LongSparseArray<Source> sourcesById = new LongSparseArray<>();
         int state;
@@ -369,9 +382,42 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
         stop(guid);
         Session session = new Session(guid);
         session.initialLoadIndex = loadIndex;
+        session.filterId = filterId;
+        session.atLatest = atLatest;
+        session.restoreDialogId = restoreDialogId;
+        session.restoreMessageId = restoreMessageId;
+        session.restoreDate = restoreDate;
+        sessions.put(guid, session);
+        updateObservingNewMessages();
+        MessagesController.DialogFilter filter = findFilter(currentAccount, filterId);
+        if (!areAllDialogsLoaded(currentAccount, filter)) {
+            // The chat list is loaded in pages (archived chats separately): the folder's channels are only
+            // all known once it is complete.
+            session.state = STATE_WAITING_FOR_DIALOGS;
+            session.dialogsWaitStarted = SystemClock.elapsedRealtime();
+            requestAllDialogs(filter);
+            NotificationCenter.getInstance(currentAccount).postNotificationName(NotificationCenter.cgFolderFeedProgress, guid, -1, 0);
+            AndroidUtilities.runOnUIThread(() -> beginWhenDialogsLoaded(session), DIALOGS_WAIT_MS);
+            return;
+        }
+        begin(session);
+    }
+
+    /** Starts a session that waited for the chat list, once it is complete (or after DIALOGS_WAIT_MS anyway). */
+    private void beginWhenDialogsLoaded(Session session) {
+        if (sessions.get(session.guid) != session || session.state != STATE_WAITING_FOR_DIALOGS) {
+            return;
+        }
+        boolean timedOut = SystemClock.elapsedRealtime() - session.dialogsWaitStarted >= DIALOGS_WAIT_MS;
+        if (timedOut || areAllDialogsLoaded(currentAccount, findFilter(currentAccount, session.filterId))) {
+            begin(session);
+        }
+    }
+
+    private void begin(Session session) {
         MessagesController controller = MessagesController.getInstance(currentAccount);
         boolean anyUnread = false;
-        for (TLRPC.Chat chat : getFeedChannels(currentAccount, findFilter(currentAccount, filterId))) {
+        for (TLRPC.Chat chat : getFeedChannels(currentAccount, findFilter(currentAccount, session.filterId))) {
             long dialogId = -chat.id;
             TLRPC.InputPeer peer = controller.getInputPeer(dialogId);
             if (peer == null || peer instanceof TLRPC.TL_inputPeerEmpty) {
@@ -387,23 +433,69 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
             session.sources.add(source);
             session.sourcesById.put(dialogId, source);
         }
-        sessions.put(guid, session);
-        updateObservingNewMessages();
-        if (!atLatest && restoreDate > 0 && session.sourcesById.get(restoreDialogId) != null) {
-            session.restoreDialogId = restoreDialogId;
-            session.restoreMessageId = restoreMessageId;
-            session.anchorDate = restoreDate;
+        if (!session.atLatest && session.restoreDate > 0 && session.sourcesById.get(session.restoreDialogId) != null) {
+            session.anchorDate = session.restoreDate;
             session.state = STATE_AROUND;
             prepareAround(session);
-        } else if (atLatest || !anyUnread) {
+        } else if (session.atLatest || !anyUnread) {
+            session.restoreDialogId = 0;
             startAtLatest(session);
         } else {
+            session.restoreDialogId = 0;
             session.state = STATE_PROBING;
             for (Source source : session.sources) {
                 source.probeDone = !source.hasUnread();
             }
         }
         pump(session);
+    }
+
+    /** Whether the chat list is complete for the folder: the main list, and the archive if the folder includes it. */
+    public static boolean areAllDialogsLoaded(int account, @Nullable MessagesController.DialogFilter filter) {
+        MessagesController controller = MessagesController.getInstance(account);
+        return isFolderLoaded(controller, 0) && (filter == null || (filter.flags & MessagesController.DIALOG_FILTER_FLAG_EXCLUDE_ARCHIVED) != 0 || isFolderLoaded(controller, 1));
+    }
+
+    private static boolean isFolderLoaded(MessagesController controller, int folderId) {
+        return controller.isDialogsEndReached(folderId) && controller.isServerDialogsEndReached(folderId);
+    }
+
+    /**
+     * Loads the rest of the chat list page by page (from the local cache, then the server), and the archive
+     * when the folder includes archived chats, so the feed and its entry points see every channel of the
+     * folder. The dialogs list does the same when it is scrolled to the end; each loaded page triggers the
+     * next one here.
+     */
+    public void requestAllDialogs(@Nullable MessagesController.DialogFilter filter) {
+        if (filter == null || filter.isDefault() || !isFeatureEnabled()) {
+            return;
+        }
+        wantMainDialogs = true;
+        if ((filter.flags & MessagesController.DIALOG_FILTER_FLAG_EXCLUDE_ARCHIVED) == 0) {
+            wantArchivedDialogs = true;
+        }
+        continueLoadingDialogs();
+    }
+
+    private void continueLoadingDialogs() {
+        MessagesController controller = MessagesController.getInstance(currentAccount);
+        if (wantMainDialogs && !loadMoreDialogs(controller, 0)) {
+            wantMainDialogs = false;
+        }
+        if (wantArchivedDialogs && !loadMoreDialogs(controller, 1)) {
+            wantArchivedDialogs = false;
+        }
+    }
+
+    /** Requests the next page of the folder's chat list; returns false once it is complete. */
+    private static boolean loadMoreDialogs(MessagesController controller, int folderId) {
+        if (isFolderLoaded(controller, folderId)) {
+            return false;
+        }
+        if (!controller.isLoadingDialogs(folderId)) {
+            controller.loadDialogs(folderId, -1, 100, !controller.isDialogsEndReached(folderId));
+        }
+        return true;
     }
 
     /** Opens at the newest posts: only the older edge loads, the newer edge is at the live end. */
@@ -461,20 +553,22 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
 
     private void recordOpenStats(Session session) {
         float seconds = (SystemClock.elapsedRealtime() - session.startTime) / 1000f;
-        int fromCache = 0, nothingCached = 0, notCovering = 0;
+        int fromCache = 0, nothingCached = 0, noEarlier = 0, noLater = 0;
         for (Source source : session.sources) {
             if (source.fromCache) {
                 fromCache++;
             } else if (source.cacheAsked) {
-                if (source.cacheHadPosts) {
-                    notCovering++;
-                } else {
+                if (!source.cacheHadPosts) {
                     nothingCached++;
+                } else if (source.cacheMiss == CACHE_MISS_NO_EARLIER) {
+                    noEarlier++;
+                } else {
+                    noLater++;
                 }
             }
         }
         session.openStats = LocaleController.formatString(R.string.CG_FolderFeed_OpenStats, seconds, fromCache,
-                session.sources.size(), nothingCached, notCovering, session.requestsSent, session.floodWaits, session.floodWaitSeconds);
+                session.sources.size(), nothingCached, noEarlier, noLater, session.requestsSent, session.floodWaits, session.floodWaitSeconds);
         FileLog.d("FolderFeed: " + session.openStats);
     }
 
@@ -715,7 +809,12 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
             WindowScan scan = scanWindow(window, source, source.readMax, 0);
             // Usable when it starts at or before the read pointer (so its first unread message really is
             // the first one) and contains it.
-            if (scan.minId > source.readMax || scan.firstAfterPivot == null) {
+            if (scan.minId > source.readMax) {
+                source.cacheMiss = CACHE_MISS_NO_EARLIER;
+                return false;
+            }
+            if (scan.firstAfterPivot == null) {
+                source.cacheMiss = CACHE_MISS_NO_LATER;
                 return false;
             }
             // Neither end is taken from the database: it cannot tell where history begins (one request
@@ -743,7 +842,12 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
             TLRPC.Dialog dialog = controller.dialogs_dict.get(source.dialogId);
             boolean atTop = dialog != null && scan.maxId >= dialog.top_message;
             // Usable when it spans the opening point: posts on both sides of it, or nothing newer exists.
-            if (scan.olderCount == 0 || scan.newerCount == 0 && !atTop) {
+            if (scan.olderCount == 0) {
+                source.cacheMiss = CACHE_MISS_NO_EARLIER;
+                return false;
+            }
+            if (scan.newerCount == 0 && !atTop) {
+                source.cacheMiss = CACHE_MISS_NO_LATER;
                 return false;
             }
             // As for the probe window, a network page confirms the newest end.
@@ -757,6 +861,9 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
         /** Returns true when the window was used. */
         boolean onWindow(Source source, ArrayList<TLRPC.Message> window, int liveVersionAtRead);
     }
+
+    private static final int CACHE_MISS_NO_EARLIER = 1;
+    private static final int CACHE_MISS_NO_LATER = 2;
 
     private static final int CACHE_KIND_PROBE = 0;
     private static final int CACHE_KIND_AROUND = 1;
@@ -1437,6 +1544,16 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
     public void didReceivedNotification(int id, int account, Object... args) {
         if (id == NotificationCenter.dialogFiltersUpdated || id == NotificationCenter.dialogsNeedReload) {
             channelsCache.clear();
+            if (wantMainDialogs || wantArchivedDialogs) {
+                // A page of the chat list was loaded: request the next one.
+                AndroidUtilities.runOnUIThread(this::continueLoadingDialogs);
+            }
+            for (int i = 0; i < sessions.size(); i++) {
+                Session session = sessions.valueAt(i);
+                if (session.state == STATE_WAITING_FOR_DIALOGS) {
+                    AndroidUtilities.runOnUIThread(() -> beginWhenDialogsLoaded(session));
+                }
+            }
         } else if (id == NotificationCenter.didReceiveNewMessages) {
             long dialogId = (Long) args[0];
             boolean scheduled = (Boolean) args[2];

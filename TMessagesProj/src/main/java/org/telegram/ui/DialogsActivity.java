@@ -14977,6 +14977,8 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
         if (folderFeedItem == null) {
             return;
         }
+        // The folder's channels are only all known once the chat list (and archive) is fully loaded.
+        FolderFeedController.getInstance(currentAccount).requestAllDialogs(filter);
         folderFeedItemVisible = CherrygramChatsConfig.INSTANCE.showFolderFeedActionBarButton() && FolderFeedController.isAvailableForFilter(currentAccount, filter);
         checkUi_itemFolderFeedVisibility();
     }
