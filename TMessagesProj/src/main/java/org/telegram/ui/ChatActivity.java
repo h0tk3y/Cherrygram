@@ -717,15 +717,18 @@ public class ChatActivity extends BaseFragment implements
     /** Cherrygram: merged feed of every channel of a chat folder, see FolderFeedController. */
     public static final int MODE_FOLDER_FEED = 100;
     private int folderFeedFilterId;
-    /** The next (re)load of the merged feed opens at the newest posts instead of the first unread one. */
-    private boolean folderFeedOpenAtLatest;
-    /** Forward pages the "next unread" button may still load while looking for an unread post. */
-    private int folderFeedNextUnreadLoads;
-    /** The "next unread" button requested a newer page and continues when it arrives. */
-    private boolean folderFeedWaitingNextUnread;
+    /** Where the next (re)load of the merged feed opens: FOLDER_FEED_OPEN_*. */
+    private int folderFeedOpenAt = FOLDER_FEED_OPEN_SAVED;
+    /** At the saved position if there is one, else at the first unread post (like a channel). */
+    private static final int FOLDER_FEED_OPEN_SAVED = 0;
+    /** At the newest posts (jump to bottom). */
+    private static final int FOLDER_FEED_OPEN_LATEST = 1;
+    /** At the oldest unread post across the channels, ignoring the saved position (next unread). */
+    private static final int FOLDER_FEED_OPEN_UNREAD = 2;
+    /** The "next unread" button reopened the feed at the next unread post and shows its spinner until it opens. */
+    private boolean folderFeedJumpingToUnread;
     /** Offset of the saved post being restored, as in a channel's "diditemo"; MAX_VALUE when none. */
     private int folderFeedRestoreOffset = Integer.MAX_VALUE;
-    private static final int MAX_FOLDER_FEED_NEXT_UNREAD_LOADS = 10;
 
     public static final int SEARCH_THIS_CHAT = 0;
     public static final int SEARCH_MY_MESSAGES = 1;
@@ -3461,7 +3464,7 @@ public class ChatActivity extends BaseFragment implements
                 long restoreDialogId = 0;
                 int restoreMessageId = 0, restoreDate = 0;
                 folderFeedRestoreOffset = Integer.MAX_VALUE;
-                if (!folderFeedOpenAtLatest) {
+                if (folderFeedOpenAt == FOLDER_FEED_OPEN_SAVED) {
                     // Saved position, like a channel's "diditem": channel:realId:date:offset.
                     String saved = MessagesController.getNotificationsSettings(currentAccount).getString(getFolderFeedPositionKey(), null);
                     if (saved != null) {
@@ -3478,8 +3481,8 @@ public class ChatActivity extends BaseFragment implements
                         }
                     }
                 }
-                FolderFeedController.getInstance(currentAccount).start(classGuid, folderFeedFilterId, lastLoadIndex++, folderFeedOpenAtLatest, restoreDialogId, restoreMessageId, restoreDate);
-                folderFeedOpenAtLatest = false;
+                FolderFeedController.getInstance(currentAccount).start(classGuid, folderFeedFilterId, lastLoadIndex++, folderFeedOpenAt == FOLDER_FEED_OPEN_LATEST, restoreDialogId, restoreMessageId, restoreDate);
+                folderFeedOpenAt = FOLDER_FEED_OPEN_SAVED;
             } else if (startLoadFromDate != 0) {
                 getMessagesController().loadMessages(dialog_id, mergeDialogId, false, 30, 0, startLoadFromDate, true, 0, classGuid, 4, 0, chatMode, threadMessageId, replyMaxReadId, lastLoadIndex++, isTopic);
             } else if (startLoadFromMessageId != 0 && (!isThreadChat() || startLoadFromMessageId == highlightMessageId || isTopic)) {
@@ -48324,7 +48327,7 @@ public class ChatActivity extends BaseFragment implements
 
     private void onSideControlButtonOnClick(int buttonId, View v) {
         if (buttonId == ChatActivitySideControlsButtonsLayout.BUTTON_FEED_NEXT_UNREAD) {
-            scrollToNextFolderFeedUnread(false);
+            scrollToNextFolderFeedUnread();
             return;
         }
         if (buttonId == ChatActivitySideControlsButtonsLayout.BUTTON_PAGE_DOWN) {
@@ -48912,14 +48915,14 @@ public class ChatActivity extends BaseFragment implements
             if (direction == FolderFeedController.LOADED_INITIAL) {
                 restoreFolderFeedPosition((Integer) args[4]);
             }
-            updateFolderFeedUnreadButton(true);
-            if (direction == FolderFeedController.LOADED_NEWER && folderFeedWaitingNextUnread) {
-                // The "next unread" button is waiting for a newer page.
-                folderFeedWaitingNextUnread = false;
-                AndroidUtilities.runOnUIThread(() -> scrollToNextFolderFeedUnread(true));
-            } else {
-                AndroidUtilities.runOnUIThread(() -> checkScrollForLoad(false));
+            if (direction == FolderFeedController.LOADED_INITIAL && folderFeedJumpingToUnread) {
+                folderFeedJumpingToUnread = false;
+                if (sideControlsButtonsLayout != null) {
+                    sideControlsButtonsLayout.setButtonLoading(ChatActivitySideControlsButtonsLayout.BUTTON_FEED_NEXT_UNREAD, false, true);
+                }
             }
+            updateFolderFeedUnreadButton(true);
+            AndroidUtilities.runOnUIThread(() -> checkScrollForLoad(false));
         } else if (id == NotificationCenter.updateInterfaces) {
             if (chatMode == MODE_FOLDER_FEED && (((Integer) args[0]) & (MessagesController.UPDATE_MASK_READ_DIALOG_MESSAGE | MessagesController.UPDATE_MASK_NEW_MESSAGE)) != 0) {
                 updateFolderFeedUnreadButton(true);
@@ -49166,13 +49169,14 @@ public class ChatActivity extends BaseFragment implements
     }
 
     /**
-     * Scrolls to the oldest unread post below the screen (newer), loading newer pages until one is found
-     * when they are not loaded yet; with none left below, scrolls to any remaining unread post.
+     * Scrolls to the oldest unread post below the screen (newer). When none is loaded there, the feed is
+     * reopened at the next unread post, the way a channel jumps to a far message: paging forward to it
+     * could mean loading every channel through weeks of posts that were read already, while reopening
+     * costs at most one request per channel (fewer with the cache). With the newest posts loaded and
+     * nothing unread below, any other loaded unread post is next.
      */
-    private void scrollToNextFolderFeedUnread(boolean continuing) {
-        if (chatListView == null || messages.isEmpty()) {
-            folderFeedNextUnreadLoads = 0;
-            sideControlsButtonsLayout.setButtonLoading(ChatActivitySideControlsButtonsLayout.BUTTON_FEED_NEXT_UNREAD, false, true);
+    private void scrollToNextFolderFeedUnread() {
+        if (chatListView == null || messages.isEmpty() || folderFeedJumpingToUnread) {
             return;
         }
         wasManualScroll = true;
@@ -49194,21 +49198,7 @@ public class ChatActivity extends BaseFragment implements
                 break;
             }
         }
-        if (target == null && !forwardEndReached[0]) {
-            // The next unread post may be in a newer page that is not loaded yet.
-            if (!continuing) {
-                folderFeedNextUnreadLoads = MAX_FOLDER_FEED_NEXT_UNREAD_LOADS;
-            }
-            if (folderFeedNextUnreadLoads > 0 && loadFolderFeedForward()) {
-                folderFeedNextUnreadLoads--;
-                folderFeedWaitingNextUnread = true;
-                sideControlsButtonsLayout.setButtonLoading(ChatActivitySideControlsButtonsLayout.BUTTON_FEED_NEXT_UNREAD, true, true);
-                return;
-            }
-        }
-        folderFeedNextUnreadLoads = 0;
-        sideControlsButtonsLayout.setButtonLoading(ChatActivitySideControlsButtonsLayout.BUTTON_FEED_NEXT_UNREAD, false, true);
-        if (target == null) {
+        if (target == null && forwardEndReached[0]) {
             for (int i = messages.size() - 1; i >= 0; i--) {
                 if (isFolderFeedUnread(messages.get(i))) {
                     target = messages.get(i);
@@ -49216,21 +49206,39 @@ public class ChatActivity extends BaseFragment implements
                 }
             }
         }
-        if (target == null) {
-            updateFolderFeedUnreadButton(true);
+        if (target != null) {
+            scrollToMessageId(target.getId(), 0, true, 0, true, 0);
             return;
         }
-        scrollToMessageId(target.getId(), 0, true, 0, true, 0);
+        if (!forwardEndReached[0] || FolderFeedController.getInstance(currentAccount).getUnreadCount(classGuid) > 0) {
+            // Not loaded: reopen at the oldest unread post across the channels (with the read positions as
+            // they are now, that is the next one), like opening the feed fresh.
+            jumpToFolderFeedUnread();
+            return;
+        }
+        updateFolderFeedUnreadButton(true);
+    }
+
+    private void jumpToFolderFeedUnread() {
+        reloadFolderFeed(FOLDER_FEED_OPEN_UNREAD);
+        folderFeedJumpingToUnread = true;
+        if (sideControlsButtonsLayout != null) {
+            sideControlsButtonsLayout.setButtonLoading(ChatActivitySideControlsButtonsLayout.BUTTON_FEED_NEXT_UNREAD, true, true);
+        }
     }
 
     /** Reloads the merged folder feed at the newest posts. */
     private void reloadFolderFeed() {
+        reloadFolderFeed(FOLDER_FEED_OPEN_LATEST);
+    }
+
+    /** Reloads the merged folder feed, opening as given (FOLDER_FEED_OPEN_*). */
+    private void reloadFolderFeed(int openAt) {
         if (chatMode != MODE_FOLDER_FEED) {
             return;
         }
-        folderFeedNextUnreadLoads = 0;
-        folderFeedWaitingNextUnread = false;
-        folderFeedOpenAtLatest = true;
+        folderFeedJumpingToUnread = false;
+        folderFeedOpenAt = openAt;
         // Synthetic ids restart with the new session: an old first-unread id could match another post.
         first_unread_id = 0;
         if (sideControlsButtonsLayout != null) {
