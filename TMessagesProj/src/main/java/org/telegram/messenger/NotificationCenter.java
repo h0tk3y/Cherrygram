@@ -1175,6 +1175,7 @@ public class NotificationCenter {
     public static final int cgUnreadCounterChanged = totalEvents++;
     public static final int cgFolderFeedLoaded = totalEvents++;
     public static final int cgFolderFeedNewPosts = totalEvents++;
+    public static final int cgFolderFeedProgress = totalEvents++;
     /** Cherrygram finish */
 
 }

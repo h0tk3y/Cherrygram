@@ -22,6 +22,7 @@ import android.widget.LinearLayout;
 
 import org.telegram.messenger.LocaleController;
 import org.telegram.messenger.MessagesController;
+import org.telegram.messenger.NotificationCenter;
 import org.telegram.messenger.R;
 import org.telegram.tgnet.TLRPC;
 import org.telegram.ui.ActionBar.ActionBar;
@@ -42,7 +43,7 @@ import java.util.ArrayList;
  * {@link ChatActivity} in {@link ChatActivity#MODE_FOLDER_FEED} hosted in a container, the same way
  * the hashtag search hosts its "public posts" chat.
  */
-public class FolderFeedActivity extends BaseFragment {
+public class FolderFeedActivity extends BaseFragment implements NotificationCenter.NotificationCenterDelegate {
 
     private static final int MENU_CHANNELS = 1;
 
@@ -69,7 +70,33 @@ public class FolderFeedActivity extends BaseFragment {
         if (FolderFeedController.findFilter(currentAccount, filterId) == null) {
             return false;
         }
+        getNotificationCenter().addObserver(this, NotificationCenter.cgFolderFeedProgress);
+        getNotificationCenter().addObserver(this, NotificationCenter.cgFolderFeedLoaded);
         return super.onFragmentCreate();
+    }
+
+    private int getFeedGuid() {
+        return chatContainer != null && chatContainer.chatActivity != null ? chatContainer.chatActivity.getClassGuid() : 0;
+    }
+
+    private void setChannelsSubtitle() {
+        if (actionBar != null) {
+            int count = FolderFeedController.getFeedChannelsCount(currentAccount, FolderFeedController.findFilter(currentAccount, filterId));
+            actionBar.setSubtitle(LocaleController.formatPluralString("CG_FolderFeed_ChannelsCount", count));
+        }
+    }
+
+    @Override
+    public void didReceivedNotification(int id, int account, Object... args) {
+        if (actionBar == null || (Integer) args[0] != getFeedGuid()) {
+            return;
+        }
+        if (id == NotificationCenter.cgFolderFeedProgress) {
+            // A large folder takes a while to open: show how many channels are loaded so far.
+            actionBar.setSubtitle(LocaleController.formatString(R.string.CG_FolderFeed_Loading, (Integer) args[1], (Integer) args[2]));
+        } else if (id == NotificationCenter.cgFolderFeedLoaded) {
+            setChannelsSubtitle();
+        }
     }
 
     @Override
@@ -192,6 +219,8 @@ public class FolderFeedActivity extends BaseFragment {
 
     @Override
     public void onFragmentDestroy() {
+        getNotificationCenter().removeObserver(this, NotificationCenter.cgFolderFeedProgress);
+        getNotificationCenter().removeObserver(this, NotificationCenter.cgFolderFeedLoaded);
         // ChatActivityContainer never destroys its fragment: release its observers and the feed session.
         if (chatContainer != null && chatContainer.chatActivity != null && chatContainer.chatActivity.getFragmentView() != null) {
             chatContainer.chatActivity.onFragmentDestroy();

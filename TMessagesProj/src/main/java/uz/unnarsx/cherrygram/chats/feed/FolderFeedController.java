@@ -9,6 +9,7 @@
 
 package uz.unnarsx.cherrygram.chats.feed;
 
+import android.os.SystemClock;
 import android.util.SparseArray;
 
 import androidx.annotation.Nullable;
@@ -62,18 +63,17 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
 
     private static final int PAGE_SIZE = 20;
     private static final int FETCH_LIMIT = 20;
-    /** Opening: posts fetched per unread channel right after its read pointer, to find its first unread post. */
-    private static final int PROBE_LIMIT = 5;
     /** Opening: posts fetched per channel at or after / before the time of the oldest first unread post. */
     private static final int AROUND_NEWER = 20;
     private static final int AROUND_OLDER = 10;
     /**
      * getHistory requests in flight at once. Telegram has no multi-chat history method, but parallel
      * requests share MTProto containers, so a few in flight cost little; after a FLOOD_WAIT the
-     * controller falls back to a gentle limit.
+     * controller falls back to a gentle limit and recovers once the server stops asking to wait.
      */
     private static final int MAX_PARALLEL_REQUESTS = 8;
     private static final int FLOOD_PARALLEL_REQUESTS = 2;
+    private static final long FLOOD_CALM_MS = 30_000;
     private static final long CHANNELS_CACHE_MS = 1000;
 
     private static final FolderFeedController[] Instance = new FolderFeedController[UserConfig.MAX_ACCOUNT_COUNT];
@@ -96,6 +96,8 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
     private final SparseArray<Session> sessions = new SparseArray<>();
     private boolean observing;
     private int maxParallel = MAX_PARALLEL_REQUESTS;
+    /** After a FLOOD_WAIT the parallelism stays low until this time (elapsedRealtime), then recovers step by step. */
+    private long floodCalmUntil;
 
     private FolderFeedController(int account) {
         currentAccount = account;
@@ -255,8 +257,14 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
         /** Read pointer and unread count when the feed was opened (posts with id > readMax are unread). */
         int readMax;
         int unreadCount;
-        /** Opening probe: date of the channel's first unread post, 0 if it has none (or only service ones). */
+        /** Opening probe: date of the channel's first unread message, 0 if it was not found. */
         int firstUnreadDate;
+        /** Opening probe: the posts around the read pointer fetched with the first unread one, reused as the
+         *  channel's starting window when it covers the time the feed opens at. */
+        ArrayList<TLRPC.Message> probeWindow;
+        boolean probeOlderEnd;
+        boolean probeNewerEnd;
+        int probeLiveVersion;
         boolean probeDone;
         boolean aroundDone;
         boolean requestInFlight;
@@ -307,6 +315,7 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
         int olderLoadIndex;
         boolean loadingNewer;
         int newerLoadIndex;
+        int progressPosted = -1;
 
         Session(int guid, int filterId) {
             this.guid = guid;
@@ -351,6 +360,7 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
             session.restoreMessageId = restoreMessageId;
             session.anchorDate = restoreDate;
             session.state = STATE_AROUND;
+            prepareAround(session);
         } else if (atLatest || !anyUnread) {
             startAtLatest(session);
         } else {
@@ -494,6 +504,7 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
                 }
             }
             if (!allDone) {
+                postProgress(session);
                 return;
             }
             int anchor = 0;
@@ -508,6 +519,7 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
             } else {
                 session.anchorDate = anchor;
                 session.state = STATE_AROUND;
+                prepareAround(session);
             }
         }
         if (session.state == STATE_AROUND) {
@@ -521,6 +533,7 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
                 }
             }
             if (!allDone) {
+                postProgress(session);
                 return;
             }
             session.state = STATE_READY;
@@ -540,11 +553,13 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
     private void probe(Session session, Source source) {
         TLRPC.TL_messages_getHistory req = new TLRPC.TL_messages_getHistory();
         req.peer = source.peer;
-        // The posts right after the read pointer. The window also covers the read post itself and one
-        // before it, so it does not depend on whether the read post still exists; those are filtered out.
+        // The posts around the read pointer: AROUND_NEWER from the read post on (it may be gone), and
+        // AROUND_OLDER before it. Besides the first unread post, this is usually the channel's whole
+        // starting window, so it needs no second request once the feed's opening time is known.
         req.offset_id = source.readMax;
-        req.add_offset = -PROBE_LIMIT;
-        req.limit = PROBE_LIMIT + 1;
+        req.add_offset = -AROUND_NEWER;
+        req.limit = AROUND_NEWER + AROUND_OLDER;
+        final int liveVersion = source.liveVersion;
         source.requestInFlight = true;
         source.requestId = ConnectionsManager.getInstance(currentAccount).sendRequest(req, (response, error) -> AndroidUtilities.runOnUIThread(() -> {
             source.requestInFlight = false;
@@ -557,14 +572,30 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
                 // Any unread message, service ones included: the feed only needs a time at or before the
                 // channel's first unread post.
                 TLRPC.Message first = null;
+                ArrayList<TLRPC.Message> window = new ArrayList<>();
+                int olderCount = 0, newerCount = 0;
                 for (TLRPC.Message message : res.messages) {
-                    if (isFromSource(message, source) && message.id > source.readMax && (first == null || message.id < first.id)) {
+                    if (!isFromSource(message, source)) {
+                        continue;
+                    }
+                    window.add(message);
+                    if (message.id < source.readMax) {
+                        olderCount++;
+                    } else {
+                        newerCount++;
+                    }
+                    if (message.id > source.readMax && (first == null || message.id < first.id)) {
                         first = message;
                     }
                 }
                 source.firstUnreadDate = first != null ? first.date : 0;
+                source.probeWindow = window;
+                source.probeOlderEnd = olderCount < AROUND_OLDER;
+                source.probeNewerEnd = newerCount < AROUND_NEWER;
+                source.probeLiveVersion = liveVersion;
                 source.probeDone = true;
                 source.requestRetries = 0;
+                onRequestSucceeded();
             } else if (!scheduleRetry(session, error, ++source.requestRetries, () -> source.requestInFlight = true, () -> source.requestInFlight = false)) {
                 source.probeDone = true;
             } else {
@@ -591,42 +622,20 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
             if (response instanceof TLRPC.messages_Messages) {
                 TLRPC.messages_Messages res = (TLRPC.messages_Messages) response;
                 putUsersAndChats(res);
-                TLRPC.Message oldestOlder = null, newestNewer = null, newest = null;
                 int olderCount = 0, newerCount = 0;
                 for (TLRPC.Message message : res.messages) {
-                    if (!isFromSource(message, source)) {
-                        continue;
-                    }
-                    if (newest == null || message.id > newest.id) newest = message;
-                    boolean newer = message.date >= session.anchorDate;
-                    if (newer) {
-                        newerCount++;
-                        if (newestNewer == null || message.id > newestNewer.id) newestNewer = message;
-                    } else {
-                        olderCount++;
-                        if (oldestOlder == null || message.id < oldestOlder.id) oldestOlder = message;
-                    }
-                    if (isPost(message, source) && source.seen.add(message.id)) {
-                        (newer ? source.newer : source.older).buffer.add(message);
+                    if (isFromSource(message, source)) {
+                        if (message.date >= session.anchorDate) {
+                            newerCount++;
+                        } else {
+                            olderCount++;
+                        }
                     }
                 }
-                sortNewestFirst(source.older.buffer);
-                sortOldestFirst(source.newer.buffer);
-                if (oldestOlder != null) {
-                    source.older.offsetId = oldestOlder.id;
-                    source.older.frontier = oldestOlder.date;
-                }
-                source.older.exhausted = olderCount < AROUND_OLDER;
-                if (newestNewer != null) {
-                    source.newer.offsetId = newestNewer.id;
-                    source.newer.frontier = newestNewer.date;
-                } else {
-                    // Nothing at or after the anchor yet: newer posts, once they arrive, follow the newest one.
-                    setNewerStart(source, newest);
-                }
-                source.newer.exhausted = newerCount < AROUND_NEWER && source.liveVersion == liveVersion;
+                applyWindow(session, source, res.messages, olderCount < AROUND_OLDER, newerCount < AROUND_NEWER && source.liveVersion == liveVersion);
                 source.aroundDone = true;
                 source.requestRetries = 0;
+                onRequestSucceeded();
             } else if (!scheduleRetry(session, error, ++source.requestRetries, () -> source.requestInFlight = true, () -> source.requestInFlight = false)) {
                 // The channel cannot be read (e.g. it became private): leave it out of the feed.
                 source.older.exhausted = true;
@@ -638,6 +647,94 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
             }
             pump(session);
         }));
+    }
+
+    /**
+     * Decides, once the opening time is known, which channels need a request around it: a channel whose
+     * window around its read pointer already covers that time reuses it, and a channel whose last
+     * message is older has nothing there, so its posts load only when the feed is scrolled back to them.
+     */
+    private void prepareAround(Session session) {
+        MessagesController controller = MessagesController.getInstance(currentAccount);
+        for (Source source : session.sources) {
+            ArrayList<TLRPC.Message> window = source.probeWindow;
+            source.probeWindow = null;
+            if (source.aroundDone) {
+                continue;
+            }
+            if (window != null) {
+                int oldestDate = Integer.MAX_VALUE;
+                for (TLRPC.Message message : window) {
+                    oldestDate = Math.min(oldestDate, message.date);
+                }
+                if (source.probeOlderEnd || oldestDate < session.anchorDate) {
+                    applyWindow(session, source, window, source.probeOlderEnd, source.probeNewerEnd && source.liveVersion == source.probeLiveVersion);
+                    source.aroundDone = true;
+                    continue;
+                }
+            }
+            TLRPC.Dialog dialog = controller.dialogs_dict.get(source.dialogId);
+            if (dialog != null && dialog.last_message_date > 0 && dialog.last_message_date < session.anchorDate) {
+                source.older.offsetId = 0;
+                source.older.frontier = dialog.last_message_date;
+                source.newer.exhausted = true;
+                source.newer.offsetId = dialog.top_message;
+                source.newer.frontier = dialog.last_message_date;
+                source.aroundDone = true;
+            }
+        }
+    }
+
+    /**
+     * Sets a channel's starting state from a contiguous window of its history: posts from the opening
+     * time on go to the newer edge, earlier ones to the older edge.
+     */
+    private void applyWindow(Session session, Source source, ArrayList<TLRPC.Message> messages, boolean olderExhausted, boolean newerExhausted) {
+        TLRPC.Message oldestOlder = null, newestNewer = null, newest = null;
+        for (TLRPC.Message message : messages) {
+            if (!isFromSource(message, source)) {
+                continue;
+            }
+            if (newest == null || message.id > newest.id) newest = message;
+            boolean newer = message.date >= session.anchorDate;
+            if (newer) {
+                if (newestNewer == null || message.id > newestNewer.id) newestNewer = message;
+            } else {
+                if (oldestOlder == null || message.id < oldestOlder.id) oldestOlder = message;
+            }
+            if (isPost(message, source) && source.seen.add(message.id)) {
+                (newer ? source.newer : source.older).buffer.add(message);
+            }
+        }
+        sortNewestFirst(source.older.buffer);
+        sortOldestFirst(source.newer.buffer);
+        if (oldestOlder != null) {
+            source.older.offsetId = oldestOlder.id;
+            source.older.frontier = oldestOlder.date;
+        }
+        source.older.exhausted = olderExhausted || oldestOlder == null;
+        if (newestNewer != null) {
+            source.newer.offsetId = newestNewer.id;
+            source.newer.frontier = newestNewer.date;
+        } else {
+            // Nothing at or after the opening time yet: newer posts, once they arrive, follow the newest one.
+            setNewerStart(source, newest);
+        }
+        source.newer.exhausted = newerExhausted;
+    }
+
+    private void postProgress(Session session) {
+        int done = 0;
+        for (Source source : session.sources) {
+            if (source.aroundDone || session.state == STATE_PROBING && source.probeDone && source.hasUnread()) {
+                done++;
+            }
+        }
+        if (done == session.progressPosted) {
+            return;
+        }
+        session.progressPosted = done;
+        NotificationCenter.getInstance(currentAccount).postNotificationName(NotificationCenter.cgFolderFeedProgress, session.guid, done, session.sources.size());
     }
 
     private void setNewerStart(Source source, TLRPC.Message newest) {
@@ -795,6 +892,7 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
                     sortNewestFirst(edge.buffer);
                 }
                 edge.retries = 0;
+                onRequestSucceeded();
                 if (outermost == null) {
                     edge.exhausted = true;
                 } else {
@@ -945,6 +1043,7 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
                 delay = Math.max(delay, Integer.parseInt(error.text.substring("FLOOD_WAIT_".length())) * 1000 + 500);
             } catch (NumberFormatException ignore) {
             }
+            floodCalmUntil = SystemClock.elapsedRealtime() + delay + FLOOD_CALM_MS;
         }
         // Keep the slot occupied while waiting, so pump() does not start the same request again.
         markInFlight.run();
@@ -953,6 +1052,13 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
             pump(session);
         }, delay);
         return true;
+    }
+
+    /** Raises the parallelism back step by step once some time passed without a FLOOD_WAIT. */
+    private void onRequestSucceeded() {
+        if (maxParallel < MAX_PARALLEL_REQUESTS && SystemClock.elapsedRealtime() > floodCalmUntil) {
+            maxParallel++;
+        }
     }
 
     private static Source findSource(Session session, long dialogId) {
