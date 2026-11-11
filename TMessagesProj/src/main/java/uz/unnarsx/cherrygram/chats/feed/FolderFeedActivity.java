@@ -79,11 +79,19 @@ public class FolderFeedActivity extends BaseFragment implements NotificationCent
         return chatContainer != null && chatContainer.chatActivity != null ? chatContainer.chatActivity.getClassGuid() : 0;
     }
 
+    /**
+     * The channel count, once the chat list is complete: before that it would count only the channels loaded
+     * so far. An incomplete list here means the feed stopped waiting for it; the count follows with a later page.
+     */
     private void setChannelsSubtitle() {
         if (actionBar != null) {
-            int count = FolderFeedController.getFeedChannelsCount(currentAccount, FolderFeedController.findFilter(currentAccount, filterId));
-            actionBar.setSubtitle(LocaleController.formatPluralString("CG_FolderFeed_ChannelsCount", count));
+            MessagesController.DialogFilter filter = FolderFeedController.findFilter(currentAccount, filterId);
+            actionBar.setSubtitle(FolderFeedController.areAllDialogsLoaded(currentAccount, filter) ? getChannelsCountText(filter) : null);
         }
+    }
+
+    private CharSequence getChannelsCountText(MessagesController.DialogFilter filter) {
+        return LocaleController.formatPluralString("CG_FolderFeed_ChannelsCount", FolderFeedController.getFeedChannelsCount(currentAccount, filter));
     }
 
     @Override
@@ -106,12 +114,12 @@ public class FolderFeedActivity extends BaseFragment implements NotificationCent
         // brings a new feed, so release the previous one.
         destroyFeed();
         MessagesController.DialogFilter filter = FolderFeedController.findFilter(currentAccount, filterId);
-        List<TLRPC.Chat> channels = FolderFeedController.getFeedChannels(currentAccount, filter);
 
         actionBar.setBackButtonImage(R.drawable.ic_ab_back);
         actionBar.setAllowOverlayTitle(true);
         actionBar.setTitle(filter != null && !TextUtils.isEmpty(filter.name) ? filter.name : getString(R.string.CG_FolderFeed_Title));
-        actionBar.setSubtitle(LocaleController.formatPluralString("CG_FolderFeed_ChannelsCount", channels.size()));
+        // An incomplete chat list makes the feed wait for it, reporting the same "Loading chats…" right after.
+        actionBar.setSubtitle(FolderFeedController.areAllDialogsLoaded(currentAccount, filter) ? getChannelsCountText(filter) : getString(R.string.CG_FolderFeed_LoadingChats));
         actionBar.setActionBarMenuOnItemClick(new ActionBar.ActionBarMenuOnItemClick() {
             @Override
             public void onItemClick(int id) {
