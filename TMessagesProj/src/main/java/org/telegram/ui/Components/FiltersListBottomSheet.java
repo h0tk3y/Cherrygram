@@ -225,7 +225,7 @@ public class FiltersListBottomSheet extends BottomSheet implements NotificationC
         listView.setOnItemClickListener((view, position) -> {
             MessagesController.DialogFilter filter = adapter.getItem(position);
             boolean checked = view instanceof BottomSheet.BottomSheetCell ? ((BottomSheet.BottomSheetCell) view).isChecked() : false;
-            if (addOnly && filter != null && checked) {
+            if (filter != null && checked && (addOnly || isIncludedByRules(filter))) {
                 return;
             }
             delegate.didSelectFilter(filter, checked);
@@ -350,6 +350,18 @@ public class FiltersListBottomSheet extends BottomSheet implements NotificationC
     /** Cherrygram: only adding: folders that already hold every selected chat are shown dimmed and do nothing. */
     public void setAddOnly(boolean addOnly) {
         this.addOnly = addOnly;
+    }
+
+    /**
+     * Cherrygram: in the open sheet for one chat, a folder that holds it only by its chat types (it is not one of
+     * the folder's chats) is shown dimmed and does nothing: "removing" it would not undo an add, it would silently
+     * add the chat to the folder's excluded chats.
+     */
+    private boolean isIncludedByRules(MessagesController.DialogFilter filter) {
+        return stayOpen && !addOnly && selectedDialogs.size() == 1
+                && filter.includesDialog(AccountInstance.getInstance(currentAccount), selectedDialogs.get(0))
+                // Not in alwaysShow (getDialogsCount skips those, a secret chat counted as its user).
+                && !getDialogsCount(fragment, filter, selectedDialogs, true, true).isEmpty();
     }
 
     /**
@@ -529,7 +541,7 @@ public class FiltersListBottomSheet extends BottomSheet implements NotificationC
                     }
                 }
                 cell.setChecked(isChecked);
-                cell.setAlpha(addOnly && isChecked ? 0.5f : 1.0f);
+                cell.setAlpha(isChecked && (addOnly || isIncludedByRules(filter)) ? 0.5f : 1.0f);
             } else {
                 cell.setAlpha(1.0f);
                 cell.getImageView().setColorFilter(null);
