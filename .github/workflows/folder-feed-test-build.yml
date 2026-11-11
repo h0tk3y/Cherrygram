@@ -87,16 +87,28 @@ jobs:
           java-version: '17'
 
       - name: Android SDK packages
+        timeout-minutes: 20
         run: |
           SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
           yes | "$SDKMANAGER" --licenses > /dev/null
-          "$SDKMANAGER" "platforms;android-36" "build-tools;36.0.0" "ndk;27.2.12479018" "cmake;3.22.1" > /dev/null
-          # Retried: an Ubuntu mirror that does not resolve for a minute failed whole runs.
-          for attempt in 1 2 3 4; do
-            if sudo apt-get update -qq && sudo apt-get install -y -qq ccache; then break; fi
+          # Retried with a time limit per attempt: a stalled download must not hold the job for hours.
+          for attempt in 1 2 3; do
+            if timeout 600 "$SDKMANAGER" "platforms;android-36" "build-tools;36.0.0" "ndk;27.2.12479018" "cmake;3.22.1" > /dev/null; then break; fi
+            if [ "$attempt" = 3 ]; then echo "::error::Android SDK packages could not be installed"; exit 1; fi
             sleep $((attempt * 20))
           done
-          command -v ccache
+
+      # ccache only speeds up the native build: if no Ubuntu mirror answers in time, build without it.
+      - name: ccache (optional)
+        timeout-minutes: 6
+        continue-on-error: true
+        run: |
+          for attempt in 1 2 3; do
+            if timeout 90 sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=20 update -qq \
+                && timeout 90 sudo apt-get -o Acquire::http::Timeout=20 install -y -qq ccache; then break; fi
+            sleep $((attempt * 10))
+          done
+          command -v ccache || echo "::warning::ccache not installed; the native build runs without it"
 
       - name: Restore ccache
         uses: actions/cache/restore@v4

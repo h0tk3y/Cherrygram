@@ -48,13 +48,15 @@ def main():
         shutil.copy(path("ci", "ci-test-signing.jks"), key)
 
     lib_gradle = path("TMessagesProj", "build.gradle")
+    # ccache only when installed (the CI step installing it may give up on unreachable mirrors).
+    launcher = ", '-DCMAKE_C_COMPILER_LAUNCHER=ccache', '-DCMAKE_CXX_COMPILER_LAUNCHER=ccache'" if shutil.which("ccache") else ""
     replace_once(
         lib_gradle,
         "                arguments '-DANDROID_STL=c++_static', '-DANDROID_PLATFORM=android-23' //, '-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON'\n"
         "                targets 'tmessages.49'\n"
         "            }\n"
         "        }\n",
-        "                arguments '-DANDROID_STL=c++_static', '-DANDROID_PLATFORM=android-23', '-DCMAKE_C_COMPILER_LAUNCHER=ccache', '-DCMAKE_CXX_COMPILER_LAUNCHER=ccache', '-DCMAKE_BUILD_TYPE=Release'\n"
+        "                arguments '-DANDROID_STL=c++_static', '-DANDROID_PLATFORM=android-23'" + launcher + ", '-DCMAKE_BUILD_TYPE=Release'\n"
         "                targets 'tmessages.49'\n"
         "            }\n"
         "        }\n"
