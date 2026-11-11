@@ -175,7 +175,7 @@ jobs:
           gh release view "$TAG" -R "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' | while read -r name; do
             if [ "$name" != "$APK_NAME" ]; then gh release delete-asset "$TAG" "$name" -R "$GITHUB_REPOSITORY" --yes; fi
           done
-          gh release edit "$TAG" -R "$GITHUB_REPOSITORY" --title "$TITLE" --notes "$NOTES"
+          gh release edit "$TAG" -R "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "$TITLE" --notes "$NOTES"
 
   emulator-test:
     needs: build
