@@ -604,6 +604,58 @@ public class FolderFeedMergeTest {
         assertEquals(-1, initial.restoreIndex);
     }
 
+    /**
+     * A first-unread channel A and a quiet channel B whose last post is older than the opening point. Returns
+     * the server; A has posts 1..10 at 1001..1010, read up to 4 (opening point 1005), B has posts 1..3 at 501..503.
+     */
+    private FakeHistory quietChannelSetup(Channel<Post> a) {
+        FakeHistory server = new FakeHistory();
+        for (int i = 1; i <= 10; i++) {
+            server.add(p(A, i, 1000 + i));
+        }
+        for (int i = 1; i <= 3; i++) {
+            server.add(p(B, i, 500 + i));
+        }
+        a.readMax = 4;
+        a.unreadCount = 6;
+        merge.onAroundPage(a, server.getHistory(A, FolderFeedMerge.aroundQuery(1005)), 1005, a.liveVersion, server.top(A));
+        return server;
+    }
+
+    @Test
+    public void aNewPostInAQuietChannelDoesNotHideTheFirstUnreadPost() {
+        // Regression: the new post reopened B's newer edge with its frontier still at its last old post
+        // (503), which held every other channel's posts after 503 back, the first unread post too: the
+        // feed opened at read posts instead.
+        Channel<Post> a = channel(A), b = channel(B);
+        FakeHistory server = quietChannelSetup(a);
+        merge.onAroundPage(b, server.getHistory(B, FolderFeedMerge.aroundQuery(1005)), 1005, b.liveVersion, server.top(B));
+        server.add(p(B, 4, 2000));
+        FolderFeedMerge.onNewPosts(b, 4, 2000, true);
+        FolderFeedMerge.Initial<Post> initial = merge.takeInitial(Arrays.asList(a, b), 0, 0, 1005);
+        assertTrue(initial.firstUnreadIndex >= 0);
+        assertEquals("-100#5", keys(initial.messages).get(initial.firstUnreadIndex));
+        assertFalse("B's new post is still to be loaded", b.newer.exhausted);
+    }
+
+    @Test
+    public void aNewPostDuringTheAroundRequestOfAQuietChannelDoesNotHideTheFirstUnreadPost() {
+        Channel<Post> a = channel(A), b = channel(B);
+        FakeHistory server = quietChannelSetup(a);
+        int liveVersion = b.liveVersion;
+        List<Post> response = server.getHistory(B, FolderFeedMerge.aroundQuery(1005));
+        server.add(p(B, 4, 2000));
+        FolderFeedMerge.onNewPosts(b, 4, 2000, false);
+        merge.onAroundPage(b, response, 1005, liveVersion, server.top(B));
+        assertFalse("the new post is still to be loaded", b.newer.exhausted);
+        FolderFeedMerge.Initial<Post> initial = merge.takeInitial(Arrays.asList(a, b), 0, 0, 1005);
+        assertTrue(initial.firstUnreadIndex >= 0);
+        assertEquals("-100#5", keys(initial.messages).get(initial.firstUnreadIndex));
+        // Paging newer then reaches B's new post.
+        merge.onEdgePage(b, true, b.newer.offsetId, server.getHistory(B, FolderFeedMerge.edgeQuery(b, true)), 1005, b.liveVersion);
+        assertEquals(Arrays.asList("-200#4"), keys(b.newer.buffer));
+    }
+
     // endregion
 
     // region Live posts and ids
