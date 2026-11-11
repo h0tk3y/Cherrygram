@@ -196,8 +196,8 @@ final class FolderFeedMerge<M> {
         /** Messages before / from the pivot on. */
         int olderCount;
         int newerCount;
-        /** The first message after the pivot id (only with an id pivot). */
-        M firstAfterPivot;
+        /** The first post (not a service message) after the pivot id (only with an id pivot). */
+        M firstPostAfterPivot;
     }
 
     WindowScan<M> scanWindow(List<M> messages, Channel<M> channel, int pivotId, int pivotDate) {
@@ -216,8 +216,9 @@ final class FolderFeedMerge<M> {
             } else {
                 scan.olderCount++;
             }
-            if (pivotId != 0 && id > pivotId && (scan.firstAfterPivot == null || id < posts.id(scan.firstAfterPivot))) {
-                scan.firstAfterPivot = message;
+            if (pivotId != 0 && id > pivotId && !posts.isService(message)
+                    && (scan.firstPostAfterPivot == null || id < posts.id(scan.firstPostAfterPivot))) {
+                scan.firstPostAfterPivot = message;
             }
         }
         return scan;
@@ -234,9 +235,10 @@ final class FolderFeedMerge<M> {
     }
 
     void setProbeResult(Channel<M> channel, WindowScan<M> scan, boolean olderEnd, boolean newerEnd, int liveVersion) {
-        // Any unread message, service ones included: the feed only needs a time at or before the
-        // channel's first unread post.
-        channel.firstUnreadDate = scan.firstAfterPivot != null ? posts.date(scan.firstAfterPivot) : 0;
+        // The first unread post, not an earlier unread service message: the feed opens at this time, and its
+        // first page reaches only as far as the channels' windows from there, which may end before a post
+        // that comes much later than the service message.
+        channel.firstUnreadDate = scan.firstPostAfterPivot != null ? posts.date(scan.firstPostAfterPivot) : 0;
         channel.probeWindow = scan.messages;
         channel.probeOlderEnd = olderEnd;
         channel.probeNewerEnd = newerEnd;
@@ -257,13 +259,13 @@ final class FolderFeedMerge<M> {
 
     /**
      * Whether a cached window around the read pointer can stand in for the probe request: it must start
-     * at or before the read pointer (so its first unread message really is the first one) and contain it.
+     * at or before the read pointer (so its first unread post really is the first one) and contain it.
      */
     static int probeCacheVerdict(WindowScan<?> scan, int readMax) {
         if (scan.minId > readMax) {
             return CACHE_MISS_NO_EARLIER;
         }
-        if (scan.firstAfterPivot == null) {
+        if (scan.firstPostAfterPivot == null) {
             return CACHE_MISS_NO_LATER;
         }
         return CACHE_USABLE;
@@ -599,11 +601,15 @@ final class FolderFeedMerge<M> {
     }
 
     /**
-     * An older page from the top of a channel set up from the dialogs list around an opening point: if that
-     * entry was stale, the page can hold posts from the opening point on, which belong below.
+     * Whether an older page must move its posts from the opening point on to the newer edge. A channel set
+     * up from the dialogs list around an opening point (its last post was older) pages its older edge down
+     * from its current top: if posts arrived since (or the entry was stale), the first pages hold posts from
+     * the opening point on, which belong to the newer side. That is not limited to the first page: more than
+     * FETCH_LIMIT such posts span several. For every other channel the older edge only holds posts before
+     * the opening point, so the split changes nothing there.
      */
-    static boolean splitsAtAnchor(boolean newer, int requestOffsetId, int anchorDate) {
-        return !newer && requestOffsetId == 0 && anchorDate > 0;
+    static boolean splitsAtAnchor(boolean newer, int anchorDate) {
+        return !newer && anchorDate > 0;
     }
 
     /**
@@ -613,7 +619,7 @@ final class FolderFeedMerge<M> {
      */
     void onEdgePage(Channel<M> channel, boolean newer, int requestOffsetId, List<M> messages, int anchorDate, int liveVersion) {
         Edge<M> edge = channel.edge(newer);
-        boolean splitAtAnchor = splitsAtAnchor(newer, requestOffsetId, anchorDate);
+        boolean splitAtAnchor = splitsAtAnchor(newer, anchorDate);
         M outermost = null;
         int count = 0;
         boolean movedBelow = false;

@@ -739,7 +739,7 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
         }
         readCache(session, requests, CACHE_KIND_PROBE, (source, window, liveVersion) -> {
             FolderFeedMerge.WindowScan<TLRPC.Message> scan = MERGE.scanWindow(window, source, source.readMax, 0);
-            // Usable when it starts at or before the read pointer (so its first unread message really is
+            // Usable when it starts at or before the read pointer (so its first unread post really is
             // the first one) and contains it.
             int verdict = FolderFeedMerge.probeCacheVerdict(scan, source.readMax);
             if (verdict != FolderFeedMerge.CACHE_USABLE) {
