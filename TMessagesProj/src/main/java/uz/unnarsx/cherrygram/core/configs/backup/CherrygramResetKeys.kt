@@ -56,7 +56,7 @@ object CherrygramResetKeys {
         "CP_AutoQuoteReplies", "CP_DisableSwipeToNext", "CP_DisableVibration", "CP_OpenLinksInIV",
         "CP_RecordMultiMic", "CP_RecordInStereo", "CP_MuteSystemSounds", "CP_VoiceMessagesAutoPlay",
         "CP_PlayVideo", "CP_AutoPauseVideo", "CP_VideoSeekDuration",
-        "CP_Notification_Sound", "CP_VibrationInChats",
+        "CP_Notification_Sound", "CP_VibrationInChats", "CG_QuickFolderActions",
         "CG_ForwardAuthorship", "CG_ForwardCaptions", "CG_ForwardNotify", "CG_NoAuthorship", "CG_NoCaptions",
         "CG_UnarchiveOnSwipe", "CG_SortByUnread",
 
