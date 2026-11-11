@@ -35,5 +35,5 @@ jobs:
           TG_APP_ID: ${{ secrets.TG_APP_ID }}
           TG_APP_HASH: ${{ secrets.TG_APP_HASH }}
         run: |
-          pip install -q telethon==1.45.0
+          pip install -q telethon==1.45.0 tdjson==1.8.70
           python3 ci/emulator/tg_login_probe.py
