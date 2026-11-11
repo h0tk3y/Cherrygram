@@ -325,6 +325,17 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
         int olderLoadIndex;
         boolean loadingNewer;
         int newerLoadIndex;
+        /**
+         * A hidden session preparing the "next unread" jump of the feed shown by ChatActivity {@code ownerGuid}
+         * (see {@link #prefetchUnreadJump(int)}): it loads what that jump would load, then waits to be adopted.
+         */
+        boolean prefetch;
+        int ownerGuid;
+        /** The prefetch has every channel's window around the jump target and is waiting to be adopted. */
+        boolean prefetchDone;
+        long prefetchDoneAt;
+        /** The read positions the session was built from (see {@link #readStateKey}). */
+        long readKey;
         int progressPosted = -1;
         /** Local database reads before the network. */
         int probeCacheState = CACHE_NOT_READ;
@@ -345,6 +356,7 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
      * set, or when nothing is unread, it opens at the newest posts.
      */
     public void start(int guid, int filterId, int loadIndex, boolean atLatest, long restoreDialogId, int restoreMessageId, int restoreDate) {
+        Session prefetched = !atLatest && restoreDate <= 0 ? takePrefetched(guid, filterId) : null;
         stop(guid);
         Session session = new Session(guid);
         session.initialLoadIndex = loadIndex;
@@ -355,6 +367,10 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
         session.restoreDate = restoreDate;
         sessions.put(guid, session);
         updateObservingNewMessages();
+        if (prefetched != null) {
+            adopt(session, prefetched);
+            return;
+        }
         MessagesController.DialogFilter filter = findFilter(currentAccount, filterId);
         if (!areAllDialogsLoaded(currentAccount, filter)) {
             // The chat list is loaded in pages (archived chats separately): the folder's channels are only
@@ -387,7 +403,9 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
         }
         MessagesController controller = MessagesController.getInstance(currentAccount);
         boolean anyUnread = false;
-        for (TLRPC.Chat chat : getFeedChannels(currentAccount, findFilter(currentAccount, session.filterId))) {
+        MessagesController.DialogFilter filter = findFilter(currentAccount, session.filterId);
+        session.readKey = readStateKey(filter);
+        for (TLRPC.Chat chat : getFeedChannels(currentAccount, filter)) {
             long dialogId = -chat.id;
             TLRPC.InputPeer peer = controller.getInputPeer(dialogId);
             if (peer == null || peer instanceof TLRPC.TL_inputPeerEmpty) {
@@ -402,6 +420,11 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
             anyUnread |= source.hasUnread();
             session.sources.add(source);
             session.sourcesById.put(dialogId, source);
+        }
+        if (session.prefetch && !anyUnread) {
+            // Nothing to jump to.
+            stop(session.guid);
+            return;
         }
         if (!session.atLatest && session.restoreDate > 0 && session.sourcesById.get(session.restoreDialogId) != null) {
             session.anchorDate = session.restoreDate;
@@ -488,6 +511,10 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
     }
 
     public void stop(int guid) {
+        if (guid > 0) {
+            // The feed's "next unread" prefetch goes with it.
+            stop(prefetchGuid(guid));
+        }
         Session session = sessions.get(guid);
         if (session == null) {
             return;
@@ -502,6 +529,113 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
         }
         sessions.remove(guid);
         updateObservingNewMessages();
+    }
+
+    // --- prefetching the "next unread" jump ---
+
+    /** How long a finished prefetch stays usable: new posts keep it current, but not forever. */
+    private static final long PREFETCH_MAX_AGE_MS = 10 * 60_000;
+
+    /** The key of the prefetch session of the feed shown by the ChatActivity with the given classGuid. */
+    private static int prefetchGuid(int ownerGuid) {
+        // classGuids are positive.
+        return -ownerGuid;
+    }
+
+    /**
+     * Prepares the "next unread" jump of the feed shown by the ChatActivity with the given classGuid, for
+     * when no unread post is loaded below the screen: in the background, loads what reopening the feed at
+     * the oldest unread post would load (finding each channel's first unread post, then every channel's
+     * posts around the oldest one). The jump then opens at once (see {@link #start}). Requests are only
+     * started while the feed on screen needs none. Does nothing if such a prefetch is running or done for
+     * the current read positions.
+     */
+    public void prefetchUnreadJump(int ownerGuid) {
+        Session owner = sessions.get(ownerGuid);
+        if (owner == null || owner.prefetch || ownerGuid <= 0) {
+            return;
+        }
+        MessagesController.DialogFilter filter = findFilter(currentAccount, owner.filterId);
+        if (filter == null || !areAllDialogsLoaded(currentAccount, filter)) {
+            return;
+        }
+        int guid = prefetchGuid(ownerGuid);
+        Session existing = sessions.get(guid);
+        if (existing != null && existing.readKey == readStateKey(filter)
+                && (!existing.prefetchDone || SystemClock.elapsedRealtime() - existing.prefetchDoneAt < PREFETCH_MAX_AGE_MS)) {
+            return;
+        }
+        stop(guid);
+        Session session = new Session(guid);
+        session.prefetch = true;
+        session.ownerGuid = ownerGuid;
+        session.filterId = owner.filterId;
+        sessions.put(guid, session);
+        updateObservingNewMessages();
+        begin(session);
+    }
+
+    /** Whether the feed a prefetch works for needs the network (or is gone): the prefetch waits. */
+    private boolean isOwnerBusy(Session prefetch) {
+        Session owner = sessions.get(prefetch.ownerGuid);
+        return owner == null || owner.state != STATE_READY || owner.initialPending || owner.loadingOlder || owner.loadingNewer
+                || owner.latestCacheState != CACHE_DONE || inFlightCount(owner) > 0;
+    }
+
+    /**
+     * Removes and returns the finished prefetch for a feed reopening at its oldest unread post, if it was
+     * built from the read positions as they are now; else null.
+     */
+    private Session takePrefetched(int ownerGuid, int filterId) {
+        int guid = prefetchGuid(ownerGuid);
+        Session prefetch = sessions.get(guid);
+        if (prefetch == null || !prefetch.prefetchDone || prefetch.filterId != filterId || inFlightCount(prefetch) > 0
+                || SystemClock.elapsedRealtime() - prefetch.prefetchDoneAt >= PREFETCH_MAX_AGE_MS) {
+            return null;
+        }
+        MessagesController.DialogFilter filter = findFilter(currentAccount, filterId);
+        if (filter == null || !areAllDialogsLoaded(currentAccount, filter) || prefetch.readKey != readStateKey(filter)) {
+            return null;
+        }
+        sessions.remove(guid);
+        return prefetch;
+    }
+
+    /** Opens the feed from a finished prefetch: its channels already have their windows around the opening point. */
+    private void adopt(Session session, Session prefetch) {
+        session.sources.addAll(prefetch.sources);
+        for (Source source : prefetch.sources) {
+            session.sourcesById.put(source.dialogId, source);
+        }
+        session.readKey = prefetch.readKey;
+        session.anchorDate = prefetch.anchorDate;
+        session.probeCacheState = CACHE_DONE;
+        session.aroundCacheState = CACHE_DONE;
+        session.state = STATE_AROUND;
+        sessions.put(session.guid, session);
+        updateObservingNewMessages();
+        pump(session);
+    }
+
+    /**
+     * Identifies the feed's channels with their read positions and whether they have unread posts: what
+     * decides where the feed opens at its oldest unread post. Independent of the channels' order.
+     */
+    private long readStateKey(@Nullable MessagesController.DialogFilter filter) {
+        MessagesController controller = MessagesController.getInstance(currentAccount);
+        long key = 0;
+        for (TLRPC.Chat chat : getFeedChannels(currentAccount, filter)) {
+            long dialogId = -chat.id;
+            TLRPC.Dialog dialog = controller.dialogs_dict.get(dialogId);
+            long h = dialogId * 0x9E3779B97F4A7C15L;
+            h ^= getReadMax(currentAccount, dialogId) * 0xC2B2AE3D27D4EB4FL;
+            h ^= dialog != null && dialog.unread_count > 0 ? 0x165667B19E3779F9L : 0;
+            h ^= h >>> 31;
+            h *= 0xBF58476D1CE4E5B9L;
+            h ^= h >>> 29;
+            key += h;
+        }
+        return key;
     }
 
     /** Whether the channel is part of the feed shown by the ChatActivity with the given classGuid. */
@@ -594,6 +728,21 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
         if (sessions.get(session.guid) != session) {
             return;
         }
+        if (session.prefetch) {
+            if (!session.prefetchDone && !isOwnerBusy(session)) {
+                drive(session);
+            }
+            return;
+        }
+        drive(session);
+        // The feed on screen needs no request right now: the prefetch may go on.
+        Session prefetch = sessions.get(prefetchGuid(session.guid));
+        if (prefetch != null && sessions.get(session.guid) == session && !prefetch.prefetchDone && !isOwnerBusy(prefetch)) {
+            drive(prefetch);
+        }
+    }
+
+    private void drive(Session session) {
         if (session.state == STATE_PROBING) {
             if (session.probeCacheState != CACHE_DONE) {
                 if (session.probeCacheState == CACHE_NOT_READ) {
@@ -605,7 +754,11 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
                 return;
             }
             int anchor = FolderFeedMerge.anchorFromProbes(session.sources);
-            if (anchor == 0) {
+            if (anchor == 0 && session.prefetch) {
+                // The jump would open at the newest posts: nothing to prepare.
+                stop(session.guid);
+                return;
+            } else if (anchor == 0) {
                 // No first unread post could be found: open at the newest posts.
                 startAtLatest(session);
             } else {
@@ -622,6 +775,12 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
                 return;
             }
             if (!runOpeningRequests(session, true)) {
+                return;
+            }
+            if (session.prefetch) {
+                // Everything the jump needs is loaded: it adopts this session (see start()).
+                session.prefetchDone = true;
+                session.prefetchDoneAt = SystemClock.elapsedRealtime();
                 return;
             }
             session.state = STATE_READY;
@@ -864,6 +1023,9 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
     }
 
     private void postProgress(Session session) {
+        if (session.prefetch) {
+            return;
+        }
         int done = 0;
         for (Source source : session.sources) {
             if (source.aroundDone || session.state == STATE_PROBING && source.probeDone && source.hasUnread()) {
@@ -1184,6 +1346,9 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
                     continue;
                 }
                 FolderFeedMerge.onNewPosts(source, minId, minDate, source.aroundDone || session.state == STATE_READY);
+                if (session.prefetch) {
+                    continue;
+                }
                 NotificationCenter.getInstance(currentAccount).postNotificationName(NotificationCenter.cgFolderFeedNewPosts, session.guid);
             }
         }

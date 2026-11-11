@@ -4,10 +4,10 @@ dialog shows how it went: time, channels read from the cache or this session's m
 the others were not, network requests (average time, parallelism) and flood waits. Regenerate
 with `git diff` if the files it touches change.
 
-diff --git b/TMessagesProj/src/main/java/uz/unnarsx/cherrygram/chats/feed/FolderFeedActivity.java a/TMessagesProj/src/main/java/uz/unnarsx/cherrygram/chats/feed/FolderFeedActivity.java
+diff --git a/TMessagesProj/src/main/java/uz/unnarsx/cherrygram/chats/feed/FolderFeedActivity.java b/TMessagesProj/src/main/java/uz/unnarsx/cherrygram/chats/feed/FolderFeedActivity.java
 index 3c84cbec..1c2e05d6 100644
---- b/TMessagesProj/src/main/java/uz/unnarsx/cherrygram/chats/feed/FolderFeedActivity.java
-+++ a/TMessagesProj/src/main/java/uz/unnarsx/cherrygram/chats/feed/FolderFeedActivity.java
+--- a/TMessagesProj/src/main/java/uz/unnarsx/cherrygram/chats/feed/FolderFeedActivity.java
++++ b/TMessagesProj/src/main/java/uz/unnarsx/cherrygram/chats/feed/FolderFeedActivity.java
 @@ -14,11 +14,13 @@ import static org.telegram.messenger.LocaleController.getString;
  import android.content.Context;
  import android.os.Bundle;
@@ -38,10 +38,10 @@ index 3c84cbec..1c2e05d6 100644
          AlertDialog dialog = builder.create();
          for (int i = 0; i < channels.size(); i++) {
              TLRPC.Chat chat = channels.get(i);
-diff --git b/TMessagesProj/src/main/java/uz/unnarsx/cherrygram/chats/feed/FolderFeedController.java a/TMessagesProj/src/main/java/uz/unnarsx/cherrygram/chats/feed/FolderFeedController.java
-index aea1c999..21263b98 100644
---- b/TMessagesProj/src/main/java/uz/unnarsx/cherrygram/chats/feed/FolderFeedController.java
-+++ a/TMessagesProj/src/main/java/uz/unnarsx/cherrygram/chats/feed/FolderFeedController.java
+diff --git a/TMessagesProj/src/main/java/uz/unnarsx/cherrygram/chats/feed/FolderFeedController.java b/TMessagesProj/src/main/java/uz/unnarsx/cherrygram/chats/feed/FolderFeedController.java
+index 723cc9c3..182975db 100644
+--- a/TMessagesProj/src/main/java/uz/unnarsx/cherrygram/chats/feed/FolderFeedController.java
++++ b/TMessagesProj/src/main/java/uz/unnarsx/cherrygram/chats/feed/FolderFeedController.java
 @@ -19,10 +19,12 @@ import org.telegram.messenger.AccountInstance;
  import org.telegram.messenger.AndroidUtilities;
  import org.telegram.messenger.ChatObject;
@@ -70,7 +70,7 @@ index aea1c999..21263b98 100644
  
          Source(long dialogId, TLRPC.InputPeer peer) {
              super(dialogId);
-@@ -331,7 +341,16 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
+@@ -342,7 +352,18 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
          int aroundCacheState = CACHE_NOT_READ;
          /** Opening at the newest posts: the channels' newest cached posts are read first. */
          int latestCacheState = CACHE_DONE;
@@ -84,11 +84,21 @@ index aea1c999..21263b98 100644
 +        int floodWaits;
 +        int floodWaitSeconds;
 +        String openStats;
++        /** Opened from a finished "next unread" prefetch. */
++        boolean prefetched;
  
          Session(int guid) {
              this.guid = guid;
-@@ -504,6 +523,42 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
+@@ -611,6 +632,7 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
+         session.probeCacheState = CACHE_DONE;
+         session.aroundCacheState = CACHE_DONE;
+         session.state = STATE_AROUND;
++        session.prefetched = true;
+         sessions.put(session.guid, session);
          updateObservingNewMessages();
+         pump(session);
+@@ -637,6 +659,45 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
+         return key;
      }
  
 +    private void recordOpenStats(Session session) {
@@ -114,6 +124,9 @@ index aea1c999..21263b98 100644
 +        session.openStats = LocaleController.formatString(R.string.CG_FolderFeed_OpenStats, seconds, fromCache,
 +                session.sources.size(), fromMemory, nothingCached, noEarlier, noLater, session.requestsSent, averageRequest,
 +                session.maxInFlight, session.floodWaits, session.floodWaitSeconds);
++        if (session.prefetched) {
++            session.openStats = "Prepared in the background (next unread prefetch). " + session.openStats;
++        }
 +        FileLog.d("FolderFeed: " + session.openStats);
 +    }
 +
@@ -130,7 +143,7 @@ index aea1c999..21263b98 100644
      /** Whether the channel is part of the feed shown by the ChatActivity with the given classGuid. */
      public boolean hasChannel(int guid, long dialogId) {
          Session session = sessions.get(guid);
-@@ -688,6 +743,7 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
+@@ -846,6 +907,7 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
              // the first one), or at the channel's first message, and contains it.
              int verdict = FolderFeedMerge.probeCacheVerdict(scan, source.readMax, startReached);
              if (verdict != FolderFeedMerge.CACHE_USABLE) {
@@ -138,7 +151,7 @@ index aea1c999..21263b98 100644
                  return false;
              }
              // Neither end is taken from the database: it cannot tell where history begins (one request
-@@ -718,6 +774,7 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
+@@ -876,6 +938,7 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
              // or nothing older exists (the channel's history begins after the opening point).
              int verdict = FolderFeedMerge.aroundCacheVerdict(scan, atTop, startReached);
              if (verdict != FolderFeedMerge.CACHE_USABLE) {
@@ -146,7 +159,7 @@ index aea1c999..21263b98 100644
                  return false;
              }
              // As for the probe window, a network page confirms the newest end.
-@@ -735,6 +792,8 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
+@@ -893,6 +956,8 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
          boolean onWindow(Source source, ArrayList<TLRPC.Message> window, int liveVersionAtRead, boolean startReached);
      }
  
@@ -155,7 +168,7 @@ index aea1c999..21263b98 100644
      private static final int CACHE_KIND_PROBE = 0;
      private static final int CACHE_KIND_AROUND = 1;
      private static final int CACHE_KIND_LATEST = 2;
-@@ -783,14 +842,18 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
+@@ -941,14 +1006,18 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
                  if (memoryWindow == null && databaseWindow == null) {
                      continue;
                  }
@@ -174,7 +187,7 @@ index aea1c999..21263b98 100644
                          break;
                      }
                  }
-@@ -922,6 +985,9 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
+@@ -1083,6 +1152,9 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
                          0L, size, messageObjects, false, firstUnreadId, newerEnd ? 0 : Integer.MIN_VALUE, 0, 0, 2, olderEnd,
                          session.guid, loadIndex, 0, 0, ChatActivity.MODE_FOLDER_FEED);
              }
@@ -184,7 +197,7 @@ index aea1c999..21263b98 100644
              // A restored position is applied by ChatActivity before the first layout (args[4]).
              notificationCenter.postNotificationName(NotificationCenter.cgFolderFeedLoaded, session.guid, olderEnd, direction, newerEnd, restoreId);
          });
-@@ -981,8 +1047,13 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
+@@ -1142,8 +1214,13 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
       */
      private void sendHistory(Session session, Slot slot, TLRPC.TL_messages_getHistory req, HistoryHandler onResponse, Runnable onGiveUp) {
          slot.inFlight = true;
@@ -198,7 +211,7 @@ index aea1c999..21263b98 100644
              if (sessions.get(session.guid) != session) {
                  return;
              }
-@@ -1058,6 +1129,8 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
+@@ -1219,6 +1296,8 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
              try {
                  int seconds = Integer.parseInt(error.text.substring("FLOOD_WAIT_".length()));
                  delay = Math.max(delay, seconds * 1000 + 500);
@@ -207,10 +220,10 @@ index aea1c999..21263b98 100644
              } catch (NumberFormatException ignore) {
              }
              long now = SystemClock.elapsedRealtime();
-diff --git b/TMessagesProj/src/main/res-cherrygram/values/cg_strings.xml a/TMessagesProj/src/main/res-cherrygram/values/cg_strings.xml
+diff --git a/TMessagesProj/src/main/res-cherrygram/values/cg_strings.xml b/TMessagesProj/src/main/res-cherrygram/values/cg_strings.xml
 index be840a81..d1782130 100644
---- b/TMessagesProj/src/main/res-cherrygram/values/cg_strings.xml
-+++ a/TMessagesProj/src/main/res-cherrygram/values/cg_strings.xml
+--- a/TMessagesProj/src/main/res-cherrygram/values/cg_strings.xml
++++ b/TMessagesProj/src/main/res-cherrygram/values/cg_strings.xml
 @@ -304,6 +304,7 @@
      <string name="CG_FolderFeed_Channels">Channels in this feed</string>
      <string name="CG_FolderFeed_NextUnread">Next unread post</string>
