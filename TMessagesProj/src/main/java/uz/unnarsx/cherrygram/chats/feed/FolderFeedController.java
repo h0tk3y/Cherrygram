@@ -737,11 +737,11 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
                 requests.add(new FolderFeedCache.Request(source.dialogId, source.readMax, 0, FolderFeedMerge.AROUND_OLDER, FolderFeedMerge.AROUND_NEWER));
             }
         }
-        readCache(session, requests, CACHE_KIND_PROBE, (source, window, liveVersion) -> {
+        readCache(session, requests, CACHE_KIND_PROBE, (source, window, liveVersion, startReached) -> {
             FolderFeedMerge.WindowScan<TLRPC.Message> scan = MERGE.scanWindow(window, source, source.readMax, 0);
             // Usable when it starts at or before the read pointer (so its first unread post really is
-            // the first one) and contains it.
-            int verdict = FolderFeedMerge.probeCacheVerdict(scan, source.readMax);
+            // the first one), or at the channel's first message, and contains it.
+            int verdict = FolderFeedMerge.probeCacheVerdict(scan, source.readMax, startReached);
             if (verdict != FolderFeedMerge.CACHE_USABLE) {
                 source.cacheMiss = verdict;
                 return false;
@@ -749,7 +749,7 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
             // Neither end is taken from the database: it cannot tell where history begins (one request
             // when scrolling back there), and for channels without live updates both the cache and the
             // dialog's top message can be stale, so a network page confirms the newest end.
-            MERGE.setProbeResult(source, scan, false, false, liveVersion);
+            MERGE.setProbeResult(source, scan, startReached, false, liveVersion);
             return true;
         });
     }
@@ -766,26 +766,30 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
             }
         }
         MessagesController controller = MessagesController.getInstance(currentAccount);
-        readCache(session, requests, CACHE_KIND_AROUND, (source, window, liveVersion) -> {
+        readCache(session, requests, CACHE_KIND_AROUND, (source, window, liveVersion, startReached) -> {
             FolderFeedMerge.WindowScan<TLRPC.Message> scan = MERGE.scanWindow(window, source, 0, session.anchorDate);
             TLRPC.Dialog dialog = controller.dialogs_dict.get(source.dialogId);
             boolean atTop = dialog != null && scan.maxId >= dialog.top_message;
-            // Usable when it spans the opening point: posts on both sides of it, or nothing newer exists.
-            int verdict = FolderFeedMerge.aroundCacheVerdict(scan, atTop);
+            // Usable when it spans the opening point: posts on both sides of it, or nothing newer exists,
+            // or nothing older exists (the channel's history begins after the opening point).
+            int verdict = FolderFeedMerge.aroundCacheVerdict(scan, atTop, startReached);
             if (verdict != FolderFeedMerge.CACHE_USABLE) {
                 source.cacheMiss = verdict;
                 return false;
             }
             // As for the probe window, a network page confirms the newest end.
-            MERGE.applyWindow(source, scan.messages, session.anchorDate, false, false, dialogTop(source.dialogId));
+            MERGE.applyWindow(source, scan.messages, session.anchorDate, startReached, false, dialogTop(source.dialogId));
             source.aroundDone = true;
             return true;
         });
     }
 
     private interface CachedWindowHandler {
-        /** Returns true when the window was used. */
-        boolean onWindow(Source source, ArrayList<TLRPC.Message> window, int liveVersionAtRead);
+        /**
+         * Returns true when the window was used. {@code startReached}: the window holds the channel's first
+         * message, so nothing exists before it.
+         */
+        boolean onWindow(Source source, ArrayList<TLRPC.Message> window, int liveVersionAtRead, boolean startReached);
     }
 
     private static final int CACHE_MISS_NO_EARLIER = FolderFeedMerge.CACHE_MISS_NO_EARLIER;
@@ -844,7 +848,10 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
                         continue;
                     }
                     source.cacheHadPosts = true;
-                    if (handler.onWindow(source, window, versions[i])) {
+                    boolean startReached = window == memoryWindow
+                            ? windows.memoryReachesStart.contains(source.dialogId)
+                            : FolderFeedCache.holdsFirstMessage(window);
+                    if (handler.onWindow(source, window, versions[i], startReached)) {
                         source.fromCache = true;
                         source.fromMemory = window == memoryWindow;
                         break;
@@ -865,12 +872,13 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
         for (Source source : session.sources) {
             requests.add(new FolderFeedCache.Request(source.dialogId, 0, Integer.MAX_VALUE, FolderFeedMerge.FETCH_LIMIT, 0));
         }
-        readCache(session, requests, CACHE_KIND_LATEST, (source, window, liveVersion) -> MERGE.seedLatest(source, window, dialogTop(source.dialogId)));
+        readCache(session, requests, CACHE_KIND_LATEST, (source, window, liveVersion, startReached) -> MERGE.seedLatest(source, window, dialogTop(source.dialogId)));
     }
 
     /** Saves a page fetched for a channel into the local database, like a channel's own pages. */
-    private void saveToCache(Source source, ArrayList<TLRPC.Message> page, int loadType, int maxId) {
-        FolderFeedCache.write(currentAccount, source.dialogId, page, loadType, maxId, getReadMax(currentAccount, source.dialogId));
+    /** {@code reachesStart}: the server had nothing older than the page, so it holds the channel's first message. */
+    private void saveToCache(Source source, ArrayList<TLRPC.Message> page, int loadType, int maxId, boolean reachesStart) {
+        FolderFeedCache.write(currentAccount, source.dialogId, page, loadType, maxId, getReadMax(currentAccount, source.dialogId), reachesStart);
     }
 
     /** The posts around the read pointer: the channel's first unread one, and usually its starting window. */
@@ -878,8 +886,8 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
         TLRPC.TL_messages_getHistory req = historyRequest(source, FolderFeedMerge.probeQuery(source));
         final int liveVersion = source.liveVersion;
         sendHistory(session, source.opening, req, res -> {
-            saveToCache(source, res.messages, MessagesController.LOAD_AROUND_DATE, 0);
             MERGE.onProbePage(source, res.messages, liveVersion);
+            saveToCache(source, res.messages, MessagesController.LOAD_AROUND_DATE, 0, source.probeOlderEnd);
         }, () -> source.probeDone = true);
     }
 
@@ -888,8 +896,9 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
         TLRPC.TL_messages_getHistory req = historyRequest(source, FolderFeedMerge.aroundQuery(session.anchorDate));
         final int liveVersion = source.liveVersion;
         sendHistory(session, source.opening, req, res -> {
-            saveToCache(source, res.messages, MessagesController.LOAD_AROUND_DATE, 0);
             MERGE.onAroundPage(source, res.messages, session.anchorDate, liveVersion, dialogTop(source.dialogId));
+            // The older edge is exhausted when the server had fewer older posts than asked: the history start.
+            saveToCache(source, res.messages, MessagesController.LOAD_AROUND_DATE, 0, source.older.exhausted);
         }, () -> {
             // The channel cannot be read (e.g. it became private): leave it out of the feed.
             MERGE.onAroundGaveUp(source, dialogTop(source.dialogId));
@@ -1011,17 +1020,19 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
         final int liveVersion = source.liveVersion;
         final int anchorDate = session.anchorDate;
         sendHistory(session, edge, req, res -> {
+            MERGE.onEdgePage(source, newer, requestOffsetId, res.messages, anchorDate, liveVersion);
+            // An older page that leaves the edge exhausted reached the channel's first message.
+            boolean reachesStart = !newer && edge.exhausted;
             if (newer && requestOffsetId != 0) {
-                saveToCache(source, res.messages, MessagesController.LOAD_FORWARD, requestOffsetId);
+                saveToCache(source, res.messages, MessagesController.LOAD_FORWARD, requestOffsetId, false);
             } else if (!newer && requestOffsetId != 0) {
                 // The page holds only posts below the offset (no add_offset), while putMessages treats
                 // max_id as included: pass the id right below it, so the offset post's hole stays open
                 // when it is not cached.
-                saveToCache(source, res.messages, MessagesController.LOAD_BACKWARD, requestOffsetId - 1);
+                saveToCache(source, res.messages, MessagesController.LOAD_BACKWARD, requestOffsetId - 1, reachesStart);
             } else {
-                saveToCache(source, res.messages, MessagesController.LOAD_AROUND_DATE, 0);
+                saveToCache(source, res.messages, MessagesController.LOAD_AROUND_DATE, 0, reachesStart);
             }
-            MERGE.onEdgePage(source, newer, requestOffsetId, res.messages, anchorDate, liveVersion);
         }, () -> edge.exhausted = true);
     }
 

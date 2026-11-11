@@ -102,6 +102,8 @@ final class FolderFeedCacheCore {
     static final class Stretch<M> {
         final TreeMap<Integer, M> byId = new TreeMap<>();
         long lastUsed;
+        /** The stretch's oldest message is the channel's first one: nothing exists before it. */
+        boolean startReached;
 
         int minId() {
             return byId.firstKey();
@@ -130,7 +132,27 @@ final class FolderFeedCacheCore {
 
         /** Adds a contiguous page (newest first); {@code connectsTo} is a message id it continues, or 0. */
         void remember(List<M> page, int connectsTo, long now) {
+            remember(page, connectsTo, now, false);
+        }
+
+        /**
+         * Like {@link #remember(List, int, long)}; {@code reachesStart}: the page reaches the channel's first
+         * message (the server had nothing older). An empty page that reaches the start marks the stretch it
+         * continues (the one starting at {@code connectsTo}).
+         */
+        void remember(List<M> page, int connectsTo, long now, boolean reachesStart) {
+            if (page.isEmpty()) {
+                if (reachesStart && connectsTo != 0) {
+                    for (Stretch<M> stretch : list) {
+                        if (stretch.minId() == connectsTo) {
+                            stretch.startReached = true;
+                        }
+                    }
+                }
+                return;
+            }
             Stretch<M> merged = new Stretch<>();
+            merged.startReached = reachesStart;
             for (M message : page) {
                 M copy = ids.copy(message);
                 if (copy != null) {
@@ -145,8 +167,11 @@ final class FolderFeedCacheCore {
                 Stretch<M> stretch = list.get(i);
                 boolean continues = connectsTo != 0 && stretch.minId() <= connectsTo && connectsTo <= stretch.maxId();
                 if (continues || stretch.overlaps(merged)) {
-                    // Overlapping stretches are each contiguous, so together they are too.
+                    // Overlapping stretches are each contiguous, so together they are too. The result starts
+                    // at the channel's first message if the part holding its oldest message did.
+                    boolean startReached = stretch.minId() <= merged.minId() ? stretch.startReached : merged.startReached;
                     stretch.byId.putAll(merged.byId);
+                    stretch.startReached = startReached;
                     merged = stretch;
                     list.remove(i);
                     i = list.size();
@@ -170,10 +195,28 @@ final class FolderFeedCacheCore {
                 // Drop the end farther from the page just added.
                 if (center - keep.minId() > keep.maxId() - center) {
                     keep.byId.pollFirstEntry();
+                    keep.startReached = false;
                 } else {
                     keep.byId.pollLastEntry();
                 }
             }
+        }
+
+        /** Whether the window (from {@link #window}) holds the channel's first message, so nothing is older. */
+        boolean reachesStart(List<M> window) {
+            if (window == null || window.isEmpty()) {
+                return false;
+            }
+            int minId = Integer.MAX_VALUE;
+            for (M message : window) {
+                minId = Math.min(minId, ids.id(message));
+            }
+            for (Stretch<M> stretch : list) {
+                if (stretch.startReached && stretch.minId() == minId) {
+                    return true;
+                }
+            }
+            return false;
         }
 
         /**

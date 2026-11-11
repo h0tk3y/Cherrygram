@@ -32,6 +32,7 @@ import org.telegram.tgnet.TLRPC;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.Locale;
 
 /**
@@ -69,6 +70,8 @@ final class FolderFeedCache {
     /** Windows read for a set of requests, by channel: from this app session's memory and from the database. */
     static final class Windows {
         final LongSparseArray<ArrayList<TLRPC.Message>> memory = new LongSparseArray<>();
+        /** Channels whose memory window holds their first message (nothing exists before it). */
+        final HashSet<Long> memoryReachesStart = new HashSet<>();
         LongSparseArray<ArrayList<TLRPC.Message>> database = new LongSparseArray<>();
     }
 
@@ -84,6 +87,9 @@ final class FolderFeedCache {
             ArrayList<TLRPC.Message> window = readMemoryWindow(account, request);
             if (window != null) {
                 windows.memory.put(request.dialogId, window);
+                if (stretches(account, request.dialogId).reachesStart(window)) {
+                    windows.memoryReachesStart.add(request.dialogId);
+                }
             }
         }
         readDatabase(account, requests, database -> {
@@ -228,7 +234,7 @@ final class FolderFeedCache {
      * LOAD_AROUND_DATE for a window).
      * Copies are saved, since the feed later changes the ids of the messages it shows.
      */
-    static void write(int account, long dialogId, ArrayList<TLRPC.Message> page, int loadType, int maxId, int readMax) {
+    static void write(int account, long dialogId, ArrayList<TLRPC.Message> page, int loadType, int maxId, int readMax, boolean reachesStart) {
         ArrayList<TLRPC.Message> copies = new ArrayList<>(page.size());
         for (TLRPC.Message message : page) {
             if (message == null || message instanceof TLRPC.TL_messageEmpty || MessageObject.getDialogId(message) != dialogId) {
@@ -249,13 +255,17 @@ final class FolderFeedCache {
         }
         // An empty page is never saved: for a backward page, putMessages would mark the channel's history
         // as fully loaded, which is only right when the offset sits at the bottom of the cached history.
+        // The memory still learns that nothing exists below the stretch the page continues.
         if (copies.isEmpty()) {
+            if (reachesStart && loadType == MessagesController.LOAD_BACKWARD) {
+                remember(account, dialogId, copies, maxId + 1, true);
+            }
             return;
         }
         Collections.sort(copies, (a, b) -> Integer.compare(b.id, a.id));
         // Kept in memory whatever the database accepts below: a backward page continues the stretch that
         // holds its offset post (maxId + 1); other pages overlap the stretch they continue.
-        remember(account, dialogId, copies, loadType == MessagesController.LOAD_BACKWARD ? maxId + 1 : 0);
+        remember(account, dialogId, copies, loadType == MessagesController.LOAD_BACKWARD ? maxId + 1 : 0, reachesStart);
         if (loadType == MessagesController.LOAD_FORWARD && (maxId == 0 || copies.get(0).id < maxId)) {
             // A forward page needs its offset (closing holes from 0 would wipe every gap below it), and
             // must reach past it.
@@ -388,8 +398,21 @@ final class FolderFeedCache {
     }
 
     /** Adds a contiguous page (newest first); {@code connectsTo} is a message id it continues, or 0. */
-    private static void remember(int account, long dialogId, ArrayList<TLRPC.Message> page, int connectsTo) {
-        stretches(account, dialogId).remember(page, connectsTo, SystemClock.elapsedRealtime());
+    private static void remember(int account, long dialogId, ArrayList<TLRPC.Message> page, int connectsTo, boolean reachesStart) {
+        stretches(account, dialogId).remember(page, connectsTo, SystemClock.elapsedRealtime(), reachesStart);
+    }
+
+    /**
+     * Whether a database window holds the channel's first message: the "channel created" service message or
+     * message id 1. (The database has no other record of where a channel's history begins.)
+     */
+    static boolean holdsFirstMessage(ArrayList<TLRPC.Message> window) {
+        for (TLRPC.Message message : window) {
+            if (message.id == 1 || message.action instanceof TLRPC.TL_messageActionChannelCreate || message.action instanceof TLRPC.TL_messageActionChannelMigrateFrom) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** The memory's window for a request, like the database's: around the pivot within one stretch. */

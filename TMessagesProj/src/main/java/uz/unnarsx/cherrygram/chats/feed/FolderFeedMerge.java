@@ -262,7 +262,12 @@ final class FolderFeedMerge<M> {
      * at or before the read pointer (so its first unread post really is the first one) and contain it.
      */
     static int probeCacheVerdict(WindowScan<?> scan, int readMax) {
-        if (scan.minId > readMax) {
+        return probeCacheVerdict(scan, readMax, false);
+    }
+
+    /** {@code startReached}: the window holds the channel's first message, so nothing exists before it. */
+    static int probeCacheVerdict(WindowScan<?> scan, int readMax, boolean startReached) {
+        if (scan.minId > readMax && !startReached) {
             return CACHE_MISS_NO_EARLIER;
         }
         if (scan.firstPostAfterPivot == null) {
@@ -276,7 +281,15 @@ final class FolderFeedMerge<M> {
      * the opening point (posts on both sides of it), or nothing newer exists ({@code atTop}).
      */
     static int aroundCacheVerdict(WindowScan<?> scan, boolean atTop) {
-        if (scan.olderCount == 0) {
+        return aroundCacheVerdict(scan, atTop, false);
+    }
+
+    /**
+     * {@code startReached}: the window holds the channel's first message. A channel whose history begins
+     * after the opening point has no posts before it at all: its window from the opening point on covers it.
+     */
+    static int aroundCacheVerdict(WindowScan<?> scan, boolean atTop, boolean startReached) {
+        if (scan.olderCount == 0 && !startReached) {
             return CACHE_MISS_NO_EARLIER;
         }
         if (scan.newerCount == 0 && !atTop) {
