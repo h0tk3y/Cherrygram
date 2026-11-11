@@ -87,6 +87,12 @@ object CherrygramChatsConfig: CoroutineScope by CoroutineScope(
     fun showFolderFeedActionBarButton(): Boolean = folderChannelsFeedEntry != FOLDER_FEED_ENTRY_PINNED
     /** Channels finish */
 
+    /** Folders start */
+    // Shows a chat's folders on its info screen (add or remove there), and lets chats selected in the
+    // chat list be added to folders from any folder tab.
+    var quickFolderActions by sharedPreferences.boolean("CG_QuickFolderActions", false)
+    /** Folders finish */
+
     /** Media start */
     var recordMultiMic by sharedPreferences.boolean("CP_RecordMultiMic", true)
     var recordInStereo by sharedPreferences.boolean("CP_RecordInStereo", false)
