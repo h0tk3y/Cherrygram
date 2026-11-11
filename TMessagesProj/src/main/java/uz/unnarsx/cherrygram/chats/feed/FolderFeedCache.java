@@ -215,7 +215,8 @@ final class FolderFeedCache {
     /**
      * Saves a contiguous page of a channel's history fetched by the feed, like MessagesController saves a
      * channel's page: {@code loadType} and {@code maxId} are those of {@link MessagesStorage#putMessages}
-     * (LOAD_BACKWARD / LOAD_FORWARD with the request's offset id, or LOAD_AROUND_DATE for a window).
+     * (LOAD_BACKWARD with the newest id the page may cover, LOAD_FORWARD with the request's offset id, or
+     * LOAD_AROUND_DATE for a window).
      * Copies are saved, since the feed later changes the ids of the messages it shows.
      */
     static void write(int account, long dialogId, ArrayList<TLRPC.Message> page, int loadType, int maxId, int readMax) {
@@ -228,13 +229,26 @@ final class FolderFeedCache {
             if (copy == null) {
                 return;
             }
-            copy.unread = !copy.out && copy.id > readMax;
+            if (copy.action instanceof TLRPC.TL_messageActionChatMigrateTo || copy.action instanceof TLRPC.TL_messageActionChannelCreate) {
+                copy.unread = false;
+                copy.media_unread = false;
+            } else {
+                // Outgoing posts are written as read: the feed does not track the outbox pointer.
+                copy.unread = !copy.out && copy.id > readMax;
+            }
             copies.add(copy);
         }
-        if (copies.isEmpty() && loadType != MessagesController.LOAD_BACKWARD) {
+        // An empty page is never saved: for a backward page, putMessages would mark the channel's history
+        // as fully loaded, which is only right when the offset sits at the bottom of the cached history.
+        if (copies.isEmpty()) {
             return;
         }
         Collections.sort(copies, (a, b) -> Integer.compare(b.id, a.id));
+        if (loadType == MessagesController.LOAD_FORWARD && (maxId == 0 || copies.get(0).id < maxId)) {
+            // A forward page needs its offset (closing holes from 0 would wipe every gap below it), and
+            // must reach past it.
+            return;
+        }
         MessagesStorage storage = MessagesStorage.getInstance(account);
         storage.getStorageQueue().postRunnable(() -> {
             try {
@@ -245,6 +259,25 @@ final class FolderFeedCache {
                 res.messages = copies;
                 // Queued after this runnable on the same storage thread, so it sees the prepared holes.
                 storage.putMessages(res, dialogId, loadType, maxId, false, 0, 0);
+                int pageMin = copies.get(copies.size() - 1).id;
+                int pageMax = copies.get(0).id;
+                // Queued after putMessages: the read flags above were computed on the UI thread, and a read
+                // (processPendingRead) may have been stored in between and been overwritten. Re-apply the
+                // read pointer to the saved page only; the dialog's unread count is not touched (the read
+                // that moved the pointer already updated it).
+                storage.getStorageQueue().postRunnable(() -> {
+                    Integer readPointer = MessagesController.getInstance(account).dialogs_read_inbox_max.get(dialogId);
+                    if (readPointer == null || readPointer <= 0) {
+                        return;
+                    }
+                    try {
+                        storage.getDatabase().executeFast(String.format(Locale.US,
+                                "UPDATE messages_v2 SET read_state = read_state | 1 WHERE uid = %d AND mid >= %d AND mid <= %d AND mid <= %d AND read_state IN(0,2) AND out = 0",
+                                dialogId, pageMin, pageMax, readPointer)).stepThis().dispose();
+                    } catch (Throwable e) {
+                        FileLog.e(e);
+                    }
+                });
             } catch (Throwable e) {
                 FileLog.e(e);
             }

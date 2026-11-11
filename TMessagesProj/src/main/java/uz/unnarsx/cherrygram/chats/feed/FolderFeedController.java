@@ -589,7 +589,6 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
             if (sessions.get(session.guid) != session) {
                 return;
             }
-            MessagesController controller = MessagesController.getInstance(currentAccount);
             for (int i = 0; i < session.sources.size(); i++) {
                 Source source = session.sources.get(i);
                 ArrayList<TLRPC.Message> window = windows.get(source.dialogId);
@@ -599,10 +598,9 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
                 // Usable when it starts at or before the read pointer (so its first unread message really is
                 // the first one) and contains it.
                 TLRPC.Message first = null;
-                int minId = Integer.MAX_VALUE, maxId = 0;
+                int minId = Integer.MAX_VALUE;
                 for (TLRPC.Message message : window) {
                     minId = Math.min(minId, message.id);
-                    maxId = Math.max(maxId, message.id);
                     if (message.id > source.readMax && (first == null || message.id < first.id)) {
                         first = message;
                     }
@@ -610,13 +608,14 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
                 if (minId > source.readMax || first == null) {
                     continue;
                 }
-                TLRPC.Dialog dialog = controller.dialogs_dict.get(source.dialogId);
                 source.firstUnreadDate = first.date;
                 source.probeWindow = window;
                 // The database cannot tell where the channel's history begins; that costs at most one request
                 // when scrolling back there.
                 source.probeOlderEnd = false;
-                source.probeNewerEnd = dialog != null && maxId >= dialog.top_message;
+                // Not trusted for the newest end: for channels without live updates both the cache and the
+                // dialog's top message can be stale, so one network page confirms where history ends.
+                source.probeNewerEnd = false;
                 source.probeLiveVersion = versions[i];
                 source.probeDone = true;
             }
@@ -672,7 +671,8 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
                 if (!hasOlder || !hasNewer && !atTop) {
                     continue;
                 }
-                applyWindow(session, source, window, false, atTop && source.liveVersion == versions[i]);
+                // As for the probe window, a network page confirms the newest end.
+                applyWindow(session, source, window, false, false);
                 source.aroundDone = true;
             }
             session.aroundCacheState = 2;
@@ -1011,10 +1011,13 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
             if (response instanceof TLRPC.messages_Messages) {
                 TLRPC.messages_Messages res = (TLRPC.messages_Messages) response;
                 putUsersAndChats(res);
-                if (newer) {
+                if (newer && requestOffsetId != 0) {
                     saveToCache(source, res.messages, MessagesController.LOAD_FORWARD, requestOffsetId);
-                } else if (requestOffsetId != 0) {
-                    saveToCache(source, res.messages, MessagesController.LOAD_BACKWARD, requestOffsetId);
+                } else if (!newer && requestOffsetId != 0) {
+                    // The page holds only posts below the offset (no add_offset), while putMessages treats
+                    // max_id as included: pass the id right below it, so the offset post's hole stays open
+                    // when it is not cached.
+                    saveToCache(source, res.messages, MessagesController.LOAD_BACKWARD, requestOffsetId - 1);
                 } else {
                     saveToCache(source, res.messages, MessagesController.LOAD_AROUND_DATE, 0);
                 }
