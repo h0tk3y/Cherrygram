@@ -2887,6 +2887,9 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
     @Override
     public boolean onFragmentCreate() {
         super.onFragmentCreate();
+        // Cherrygram: created before this screen's observers, so the merged feed's folder cache is cleared
+        // before this screen reads it on folder and dialog list changes (observers run in that order).
+        FolderFeedController.getInstance(currentAccount);
 
         if (CherrygramMessagesConfig.INSTANCE.getEnableMsgFilters() && CherrygramMessagesConfig.INSTANCE.getMsgFiltersHideFromBlocked()) {
             getMessagesController().getBlockedPeers(false);
@@ -14971,6 +14974,9 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
     private boolean folderFeedItemVisible;
 
     private void updateFolderFeedItem(MessagesController.DialogFilter filter) {
+        if (folderFeedItem == null) {
+            return;
+        }
         folderFeedItemVisible = CherrygramChatsConfig.INSTANCE.showFolderFeedActionBarButton() && FolderFeedController.isAvailableForFilter(currentAccount, filter);
         checkUi_itemFolderFeedVisibility();
     }

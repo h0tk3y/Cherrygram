@@ -49240,7 +49240,7 @@ public class ChatActivity extends BaseFragment implements
         }
         FolderFeedController.getInstance(currentAccount).stop(classGuid);
         clearChatData(true);
-        updateFolderFeedUnreadButton(false);
+        // The next-unread button keeps its count: it refreshes with the first page of the new session.
         startMessageAppearTransitionMs = 0;
         firstMessagesLoaded = false;
         loading = false;

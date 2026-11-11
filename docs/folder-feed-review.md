@@ -85,3 +85,16 @@ No damage to non-feed behaviour was found: the shared-class edits only act on fe
 | 22 | nit | A preferences file was written into the output directory. | **fixed** (removed with the login flow) |
 | 23 | nit | Token in the git remote URL for the screenshot push. | **accepted**: masked by Actions; used only in the separate write job. |
 | 24 | nit | "Free disk space" may no longer be needed. | **deferred**: unverified; removing it risks running out of disk space. |
+
+## Verification pass of the app fixes
+
+A second Fable pass compared `60c51d4f` with its parent and looked for regressions. It found no compile problem, paging stall, or lost or duplicated posts. Three low-severity regressions were fixed in the follow-up commit:
+
+| # | Severity | Finding | Status |
+|---|---|---|---|
+| V1 | low-medium | End flags taken only at post time could be premature when an older and a newer page were queued back to back. An older page could then report "newest post reached" before the last newer page arrived. | **fixed**: a flag holds only if it held when the page was built and still holds when it is posted. This keeps the fix for item 4. |
+| V2 | low | Clearing the folder cache depended on observer order: the dialogs screen registers its observers before the lazily created controller, so it could read the stale cache first. | **fixed**: the dialogs screen creates the controller before registering its own observers. |
+| V3 | low | The next-unread button disappeared while the feed reloaded (its count came from the session that had just been stopped). | **fixed**: it keeps its count until the first page of the new session. |
+| V4 | nit | The action bar feed button was computed even in picker instances of the dialogs screen. | **fixed**: early return restored. |
+| V5 | note | The stale-dialog-entry fix (item 8) covers only a channel's first older page; the moved posts are appended below what is already shown. | **accepted**: edge case of an edge case. |
+| V6 | note | The newer frontier is 0 instead of "infinite" for a channel without a last message date. | **accepted**: no effect (that edge is exhausted, and a live update makes the next page fetch it). |

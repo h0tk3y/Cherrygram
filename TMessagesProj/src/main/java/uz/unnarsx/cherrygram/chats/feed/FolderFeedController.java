@@ -902,22 +902,25 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
             }
         }
         session.initialPending = false;
-        postPage(session, messageObjects, LOADED_INITIAL, session.initialLoadIndex, firstUnreadId, restoreId);
+        postPage(session, messageObjects, LOADED_INITIAL, session.initialLoadIndex, firstUnreadId, restoreId,
+                !hasMore(session, false), !hasMore(session, true));
     }
 
     /**
      * Posts a page to ChatActivity: messagesDidLoad, then cgFolderFeedLoaded(guid, olderEnd, direction,
      * newerEnd, restoreMessageId). Always asynchronous, like regular history loads (pages are requested
-     * from scroll callbacks); the end flags are taken when the page is posted, so a new post that arrived
-     * in between is not lost.
+     * from scroll callbacks). An end flag holds only if it held when the page was built (a later page
+     * of the other direction may still be queued) and still holds when it is posted (a new post may have
+     * reopened the newer edge in between).
      */
-    private void postPage(Session session, ArrayList<MessageObject> messageObjects, int direction, int loadIndex, int firstUnreadId, int restoreId) {
+    private void postPage(Session session, ArrayList<MessageObject> messageObjects, int direction, int loadIndex, int firstUnreadId, int restoreId,
+                          boolean olderEndWhenBuilt, boolean newerEndWhenBuilt) {
         AndroidUtilities.runOnUIThread(() -> {
             if (sessions.get(session.guid) != session) {
                 return;
             }
-            boolean olderEnd = !hasMore(session, false);
-            boolean newerEnd = !hasMore(session, true);
+            boolean olderEnd = olderEndWhenBuilt && !hasMore(session, false);
+            boolean newerEnd = newerEndWhenBuilt && !hasMore(session, true);
             NotificationCenter notificationCenter = NotificationCenter.getInstance(currentAccount);
             int size = messageObjects.size();
             if (direction == LOADED_NEWER) {
@@ -1165,7 +1168,7 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
         }
         int direction = newer ? LOADED_NEWER : (session.initialPending ? LOADED_INITIAL : LOADED_OLDER);
         session.initialPending = false;
-        postPage(session, messageObjects, direction, loadIndex, 0, 0);
+        postPage(session, messageObjects, direction, loadIndex, 0, 0, !hasMore(session, false), !hasMore(session, true));
     }
 
     // --- helpers ---
