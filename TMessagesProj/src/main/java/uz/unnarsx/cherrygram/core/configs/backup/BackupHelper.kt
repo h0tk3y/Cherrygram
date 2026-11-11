@@ -72,7 +72,7 @@ object BackupHelper {
         "CP_DisableSwipeToNext", "CP_iOSMessageInputField", "CP_HideSendAsChannel", "CP_HideMuteUnmuteButton", "CP_HideKeyboardOnScrollIntensity",
         "CP_GeminiApiKey", "CP_GeminiModelName", "CP_GeminiSystemPrompt", "CP_GeminiTemperature", "CP_VoiceTranscriptionProvider",
         "translationKeyboardTarget", "translationTarget", "translationTargetGemini",
-        "CP_ShareDrawStoryButton", "CP_UsersDrawShareButton",
+        "CP_ShareDrawStoryButton", "CP_UsersDrawShareButton", "CG_QuickFolderActions",
         "CP_SupergroupsDrawShareButton", "CP_ChannelsDrawShareButton", "CP_BotsDrawShareButton",
         "CP_StickersDrawShareButton", "CP_ShowSaveForNotifications", "CP_ShowGemini", "CP_ShowReply",
         "CP_ShowSaveToGallery", "CP_ShowCopyPhoto", "CP_ShowCopyPhotoAsSticker", "CP_ShowSaveToDownloads", "CP_ShowShare",
