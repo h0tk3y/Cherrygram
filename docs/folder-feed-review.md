@@ -98,3 +98,73 @@ A second Fable pass compared `60c51d4f` with its parent and looked for regressio
 | V4 | nit | The action bar feed button was computed even in picker instances of the dialogs screen. | **fixed**: early return restored. |
 | V5 | note | The stale-dialog-entry fix (item 8) covers only a channel's first older page; the moved posts are appended below what is already shown. | **accepted**: edge case of an edge case. |
 | V6 | note | The newer frontier is 0 instead of "infinite" for a channel without a last message date. | **accepted**: no effect (that edge is exhausted, and a live update makes the next page fetch it). |
+
+## Testing
+
+### How Telegram and Cherrygram test
+
+- **Upstream Telegram** has no JVM unit tests (no `src/test` anywhere). Its only tests are instrumentation tests in `TMessagesProj_AppTests/src/androidTest`. They need a device or emulator, because they load the native `tgnet` library:
+  - `generated/Test_All.kt` has about 2,200 generated TL round-trip tests. `buildSrc`'s `TestGeneratorPlugin` regenerates it from `tlscheme/` before every build.
+  - `NativeSchemeTest` compares Java and native (de)serialization.
+  - `TlsHelloHandshakeTest` checks the fake-TLS client hello.
+  - `TestDatabaseMigration` checks that a v120 database migrated by `DatabaseMigrationHelper` matches a freshly created schema.
+- **Cherrygram** carries that module over unchanged with each upstream merge. It has no tests of its own customizations, and no CI that runs tests: its only workflow mirrors to GitLab. `MemoryStressTest` is a debug helper that fills the heap, not a test. Its git history comes in one squashed commit per release.
+
+### Unit tests of the feed (JVM)
+
+The merge/paging core and the cache's pure logic live in plain-Java classes that are generic in the message type. They use nothing but `java.util`:
+
+- `FolderFeedMerge` holds frontiers, the watermark merge, `capPage`/`takePage`, fetch order, edge pages, opening windows (probe, around, saved position, newest posts), cache verdicts, live posts and synthetic ids.
+- `FolderFeedCacheCore` holds the hole trimming of cached windows and the in-memory stretches.
+- `FolderFeedController` and `FolderFeedCache` keep the requests, dialogs list, database and notifications, and call into the core for every decision.
+
+Tests are in `TMessagesProj/src/test/java/uz/unnarsx/cherrygram/chats/feed/`:
+
+- **`FolderFeedSimulationTest`** generates random folders: 2–8 channels with different paces, deleted ids, service messages and same-second posts, including across channels. It runs them against `FakeHistory`, a fake `messages.getHistory` with Telegram's `offset_id`/`offset_date`/`add_offset`/`limit` semantics. `FeedDriver` drives the core the way the controller does, with 1, 2 or 8 requests in flight answered in random order. Over 300 seeds per scenario, it checks that:
+  - every post is shown exactly once and no service message is shown;
+  - dates never increase down the feed, each channel's ids decrease, and synthetic ids are unique and grow upwards;
+  - pages never exceed the cap, and a short page appears only at the end of history.
+  It covers opening at the newest posts, at a saved post (also a deleted one), and at the first unread post, where the opening post must be the oldest unread post. It also covers live posts that arrive while requests are in flight, and page capping.
+- **`FolderFeedMergeTest`** has focused cases for each building block, plus regression tests for the two bugs below.
+- **`FolderFeedCacheCoreTest`** covers hole trimming (holes on either side, the pivot inside a hole, boundaries) and the stretches (merging by overlap or `connectsTo`, copies, window selection, LRU and far-end trimming).
+
+To run them:
+
+```sh
+ci/unit-tests/run.sh          # plain javac + JUnit 4.13.2 (downloaded, SHA-256 checked); a few seconds
+gradle :TMessagesProj:testDebugUnitTest --tests 'uz.unnarsx.cherrygram.chats.feed.*'   # same tests via Gradle
+```
+
+`run.sh` compiles only the two core classes with the tests, so the build fails if the core ever picks up an Android or Telegram dependency.
+
+In CI (`.github/workflows/folder-feed-test-build.yml`):
+
+- The `unit-tests` job runs `run.sh` in about a minute, and the APK build `needs` it.
+- The build job also runs the tests through Gradle and fails if none ran or any failed.
+- Both jobs write their test counts to the job summary.
+
+A mutation check (20 typical mistakes injected into the core, such as off-by-one watermarks, the wrong `capPage` end, no deduplication or ignored live posts) was caught 20/20.
+
+### Bugs the tests found (fixed in `e839c083`)
+
+| # | Severity | Finding | Status |
+|---|---|---|---|
+| T1 | medium | The feed opened at the date of a channel's first unread *message*, which may be a service message such as "post pinned". A busy channel could then fill the first page with read posts, and the feed opened without any unread post in it (no divider, no position). | **fixed**: the opening point is the first unread *post*. |
+| T2 | low-medium | A channel set up at its top around the opening point (its last post was older) that got more than 20 posts while the feed was open showed the later ones at the bottom of the feed. The split at the opening point applied only to its first older page. This is the realistic trigger of review note V5. | **fixed**: every older page is split. For channels opened around the point this changes nothing, because their older edge holds only earlier posts. |
+
+Still accepted from V5: if the dialogs list itself was stale when the feed opened (no live update), posts found later above the stale top are added at the newer end.
+
+### Emulator tests and the test-server login
+
+The emulator job is still a smoke test (`ci/emulator/ui_test.py`): install, launch, reach the intro screen, no crash. It now hides system error dialogs: an "isn't responding" dialog on the slow software-rendered emulator made `uiautomator dump` fail and the test flaky. ANRs are reported in the summary.
+
+A logged-in emulator test is still not possible. Telegram's test servers answer `PHONE_CODE_INVALID` to the documented test login code (the DC id repeated 5 or 6 times for `99966XYYYY` numbers). `ci/emulator/tg_login_probe.py` (workflow `tg-login-probe.yml`) showed this from GitHub runners for every variant tried:
+
+- Telethon 1.45.0 with legacy `p_q_inner_data` and with `p_q_inner_data_dc` set to 10000 + dc (as `tgnet` does on the test backend);
+- TDLib 1.8.70, Telegram's own reference client;
+- the repository's API id and upstream's public id 4;
+- test DCs 1, 2 and 3 (at `tgnet`'s test addresses), with sign-in immediately and after 15 s.
+
+The server reports `auth.sentCodeTypeSms` with length 5 every time. So the cause is on the server side, not in the client or the script: test numbers no longer accept the fixed code, at least from these IP ranges.
+
+The old script also had client bugs, although they are not the cause: current Telethon disables `sign_up` (1.45.0 checked: it raises `ValueError`, so new numbers could never have been registered through it), and the telethon version was unpinned. The app's own path (country code 999 in a debug build switches `tgnet` to the test DCs) would get the same answer. Run the probe again (push a change to the probe script, or use `workflow_dispatch` once the workflow is on the default branch) to check whether the servers accept the code again.

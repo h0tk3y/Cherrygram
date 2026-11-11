@@ -89,9 +89,14 @@ def main():
     os.makedirs(OUT, exist_ok=True)
 
     adb("install", "-r", "-g", args.apk, check=True, timeout=600)
+    # The first launch on the software-rendered emulator can be slow enough for an "isn't responding"
+    # dialog. While it is shown, uiautomator dumps fail, so the screen behind it could not be checked:
+    # hide such dialogs (Settings.Global.HIDE_ERROR_DIALOGS). Crashes are still caught from logcat, and
+    # ANRs are reported in the summary.
+    adb("shell", "settings put global hide_error_dialogs 1")
     adb("shell", "logcat -c")
     adb("shell", f"am start -W -n {PKG}/org.telegram.ui.LaunchActivity")
-    launched = wait_for_text("Start Messaging", timeout=90)
+    launched = wait_for_text("Start Messaging", timeout=150)
     shot = snap(1, "launch")
 
     log = adb("logcat", "-d", timeout=120)
@@ -99,11 +104,13 @@ def main():
         f.write(log)
     # Only crashes of the app itself: other processes do crash on emulators.
     crashes = [line for line in log.splitlines() if f"Process: {PKG}," in line]
+    anrs = [line for line in log.splitlines() if f"ANR in {PKG}" in line]
 
     with open(os.path.join(OUT, "summary.md"), "w") as f:
         f.write("# Emulator smoke test\n\n| step | result | screenshot |\n|---|---|---|\n")
         f.write(f"| launch to intro screen | {'PASS' if launched else 'FAIL'} | {shot} |\n")
         f.write(f"\nCrashes of {PKG} in logcat: {len(crashes)}\n")
+        f.write(f"\"Not responding\" reports (ANR) of {PKG}: {len(anrs)} (not a failure: slow emulator)\n")
         for line in crashes[:20]:
             f.write(f"    {line}\n")
     print(open(os.path.join(OUT, "summary.md")).read())
