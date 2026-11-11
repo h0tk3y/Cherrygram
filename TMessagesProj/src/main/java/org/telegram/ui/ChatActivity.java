@@ -716,8 +716,7 @@ public class ChatActivity extends BaseFragment implements
     public static final int MODE_WELCOME_MESSAGES = 9;
     /** Cherrygram: merged feed of every channel of a chat folder, see FolderFeedController. */
     public static final int MODE_FOLDER_FEED = 100;
-    public int folderFeedFilterId;
-    private int folderFeedUnreadCount;
+    private int folderFeedFilterId;
     /** The next (re)load of the merged feed opens at the newest posts instead of the first unread one. */
     private boolean folderFeedOpenAtLatest;
     /** Forward pages the "next unread" button may still load while looking for an unread post. */
@@ -9156,7 +9155,8 @@ public class ChatActivity extends BaseFragment implements
 
         flagSecure = new FlagSecureReason(getParentActivity().getWindow(), () ->
             currentEncryptedChat != null ||
-            isPeerNoForwards()
+            isPeerNoForwards() ||
+            chatMode == MODE_FOLDER_FEED && isAnyFolderFeedChannelNoForwards()
         );
 
         if (oldMessage != null) {
@@ -21788,20 +21788,7 @@ public class ChatActivity extends BaseFragment implements
             Collections.reverse(messArr);
         }
         if (chatMode == MODE_FOLDER_FEED) {
-            // Replies must be resolved within each post's own channel, not across the merged list.
-            LongSparseArray<ArrayList<MessageObject>> feedRepliesByChannel = new LongSparseArray<>();
-            for (int feedIndex = 0; feedIndex < messArr.size(); feedIndex++) {
-                MessageObject feedReplyOwner = messArr.get(feedIndex);
-                ArrayList<MessageObject> feedReplyList = feedRepliesByChannel.get(feedReplyOwner.getDialogId());
-                if (feedReplyList == null) {
-                    feedReplyList = new ArrayList<>();
-                    feedRepliesByChannel.put(feedReplyOwner.getDialogId(), feedReplyList);
-                }
-                feedReplyList.add(feedReplyOwner);
-            }
-            for (int feedIndex = 0; feedIndex < feedRepliesByChannel.size(); feedIndex++) {
-                getMediaDataController().loadReplyMessagesForMessages(feedRepliesByChannel.valueAt(feedIndex), feedRepliesByChannel.keyAt(feedIndex), MODE_DEFAULT, 0, null, classGuid, null);
-            }
+            loadFolderFeedReplies(messArr);
         } else if (currentEncryptedChat == null && chatMode != MODE_QUICK_REPLIES) {
             getMediaDataController().loadReplyMessagesForMessages(messArr, dialog_id, chatMode, 0, null, classGuid, null);
         }
@@ -24217,7 +24204,7 @@ public class ChatActivity extends BaseFragment implements
             }
         } else if (id == NotificationCenter.replyMessagesDidLoad) {
             long did = (Long) args[0];
-            if (did == dialog_id || chatMode == MODE_FOLDER_FEED && did != 0) {
+            if (did == dialog_id || chatMode == MODE_FOLDER_FEED && FolderFeedController.getInstance(currentAccount).hasChannel(classGuid, did)) {
                 ArrayList<MessageObject> loadedMessages = (ArrayList<MessageObject>) args[1];
                 LongSparseArray<SparseArray<ArrayList<MessageObject>>> replyMessageOwners = (LongSparseArray<SparseArray<ArrayList<MessageObject>>>) args[2];
                 for (int a = 0, N = loadedMessages.size(); a < N; a++) {
@@ -31791,7 +31778,7 @@ public class ChatActivity extends BaseFragment implements
             allowPin = false;
         }
         allowPin = allowPin && message.getId() > 0 && (message.messageOwner.action == null || message.messageOwner.action instanceof TLRPC.TL_messageActionEmpty) && !message.isExpiredStory() && message.type != MessageObject.TYPE_STORY_MENTION;
-        boolean noforwards = isPeerNoForwards() || message.messageOwner.noforwards || getDialogId() == UserObject.VERIFY;
+        boolean noforwards = isPeerNoForwards() || message.messageOwner.noforwards || getDialogId() == UserObject.VERIFY || isFolderFeedNoForwards(message);
         boolean noforwardsOrPaidMedia = noforwards || message.type == MessageObject.TYPE_PAID_MEDIA;
         boolean allowUnpin = message.getDialogId() != mergeDialogId && allowPin && (pinnedMessageObjects.containsKey(message.getId()) || groupedMessages != null && !groupedMessages.messages.isEmpty() && pinnedMessageObjects.containsKey(groupedMessages.messages.get(0).getId())) && !message.isExpiredStory();
         boolean allowEdit = message.canEditMessage(currentChat) && !chatActivityEnterView.hasAudioToSend() && message.getDialogId() != mergeDialogId && message.type != MessageObject.TYPE_STORY && message.type != MessageObject.TYPE_POLL;
@@ -36998,7 +36985,7 @@ public class ChatActivity extends BaseFragment implements
             getConnectionsManager().cancelRequest(commentRequestId, false);
         }
 
-        commentLoadingMessageId = fallbackMessage != null ? fallbackMessage.getId() : messageId;
+        commentLoadingMessageId = fallbackMessage != null ? fallbackMessage.getId() : originalMessage != null && originalMessage.isFolderFeedMessage ? originalMessage.getId() : messageId;
         hideCommentLoading = false;
         commentLoadingStartedAt = System.currentTimeMillis();
         if (chatListView != null) {
@@ -37320,7 +37307,7 @@ public class ChatActivity extends BaseFragment implements
                     builder.setTitleMultipleLines(true);
                 }
                 final int finalTimestamp = timestamp;
-                boolean noforwards = isPeerNoForwards() || (messageObject != null && messageObject.messageOwner != null && messageObject.messageOwner.noforwards);
+                boolean noforwards = isPeerNoForwards() || (messageObject != null && messageObject.messageOwner != null && messageObject.messageOwner.noforwards) || isFolderFeedNoForwards(messageObject);
                 builder.setItems(noforwards ? new CharSequence[] {LocaleController.getString(R.string.Open)} : new CharSequence[]{LocaleController.getString(R.string.Open), LocaleController.getString(R.string.Copy)}, (dialog, which) -> {
                     if (which == 0) {
                         if (str.startsWith("video?")) {
@@ -37702,7 +37689,7 @@ public class ChatActivity extends BaseFragment implements
         if (url == null || getParentActivity() == null) {
             return;
         }
-        boolean noforwards = isPeerNoForwards() || (messageObject != null && messageObject.messageOwner != null && messageObject.messageOwner.noforwards);
+        boolean noforwards = isPeerNoForwards() || (messageObject != null && messageObject.messageOwner != null && messageObject.messageOwner.noforwards) || isFolderFeedNoForwards(messageObject);
         if (url instanceof URLSpanMono) {
             if (!noforwards || getDialogId() == UserObject.VERIFY) {
                 ((URLSpanMono) url).copyToClipboard();
@@ -47217,7 +47204,7 @@ public class ChatActivity extends BaseFragment implements
             allowPin = false;
         }
         allowPin = allowPin && message.getId() > 0 && (message.messageOwner.action == null || message.messageOwner.action instanceof TLRPC.TL_messageActionEmpty) && !message.isExpiredStory() && message.type != MessageObject.TYPE_STORY_MENTION;
-        boolean noforwards = isPeerNoForwards() || message.messageOwner.noforwards || getDialogId() == UserObject.VERIFY;
+        boolean noforwards = isPeerNoForwards() || message.messageOwner.noforwards || getDialogId() == UserObject.VERIFY || isFolderFeedNoForwards(message);
         boolean noforwardsOrPaidMedia = noforwards || message.type == MessageObject.TYPE_PAID_MEDIA;
         boolean allowUnpin = !isEphemeral && message.getDialogId() != mergeDialogId && allowPin && (pinnedMessageObjects.containsKey(message.getId()) || groupedMessages != null && !groupedMessages.messages.isEmpty() && pinnedMessageObjects.containsKey(groupedMessages.messages.get(0).getId())) && !message.isExpiredStory();
         boolean allowEdit = !isEphemeral && message.canEditMessage(currentChat) && !chatActivityEnterView.hasAudioToSend() && message.getDialogId() != mergeDialogId && message.type != MessageObject.TYPE_STORY && message.type != MessageObject.TYPE_POLL;
@@ -47489,7 +47476,7 @@ public class ChatActivity extends BaseFragment implements
                             }
                         }
 
-                        if (selectedObject.type == MessageObject.TYPE_POLL && !message.isPollClosed()) {
+                        if (selectedObject.type == MessageObject.TYPE_POLL && !message.isPollClosed() && chatMode != MODE_FOLDER_FEED) {
                             TLRPC.MessageMedia media = MessageObject.getMedia(selectedObject);
                             if (media instanceof TLRPC.TL_messageMediaPoll) {
                                 TLRPC.TL_messageMediaPoll mediaPoll = (TLRPC.TL_messageMediaPoll) media;
@@ -48959,14 +48946,19 @@ public class ChatActivity extends BaseFragment implements
 
     /** Channel dialog id -> newest real message id already marked as read from the merged feed. */
     private final LongSparseIntArray folderFeedReadMax = new LongSparseIntArray();
+    /** Scratch arrays of markFolderFeedVisibleAsRead, which runs on every scroll step. */
+    private final LongSparseIntArray folderFeedVisibleIds = new LongSparseIntArray();
+    private final LongSparseIntArray folderFeedVisibleDates = new LongSparseIntArray();
 
     /** Marks every channel of the merged feed as read up to its newest post visible on screen. */
     private void markFolderFeedVisibleAsRead() {
         if (chatMode != MODE_FOLDER_FEED || paused || chatListView == null || inPreviewMode) {
             return;
         }
-        LongSparseIntArray maxVisibleIds = new LongSparseIntArray();
-        LongSparseIntArray maxVisibleDates = new LongSparseIntArray();
+        LongSparseIntArray maxVisibleIds = folderFeedVisibleIds;
+        LongSparseIntArray maxVisibleDates = folderFeedVisibleDates;
+        maxVisibleIds.clear();
+        maxVisibleDates.clear();
         final int listHeight = chatListView.getMeasuredHeight();
         for (int i = 0, n = chatListView.getChildCount(); i < n; i++) {
             View child = chatListView.getChildAt(i);
@@ -48992,24 +48984,28 @@ public class ChatActivity extends BaseFragment implements
             if (maxId <= readMax) {
                 continue;
             }
+            // One pass over the loaded posts: how many become read, and whether a newer one of this channel is loaded.
             int newlyRead = 0;
+            boolean newerLoaded = false;
             for (int a = 0, size = messages.size(); a < size; a++) {
                 MessageObject messageObject = messages.get(a);
                 if (messageObject.isFolderFeedMessage && messageObject.getDialogId() == did) {
                     int realId = messageObject.getRealId();
-                    if (realId > readMax && realId <= maxId) {
+                    if (realId > maxId) {
+                        newerLoaded = true;
+                    } else if (realId > readMax) {
                         newlyRead++;
                     }
                 }
             }
             int readTo = maxId;
-            if (forwardEndReached[0] && isNewestLoadedFolderFeedPost(did, maxId)) {
+            if (forwardEndReached[0] && !newerLoaded) {
                 // The channel's newest post is on screen: what was fetched after it are service messages,
                 // which the feed does not show, so read those too. Posts not fetched yet stay unread.
                 readTo = Math.max(maxId, FolderFeedController.getInstance(currentAccount).getNewestFetchedId(classGuid, did));
             }
             folderFeedReadMax.put(did, readTo);
-            // countDiff 0 would reset the unread counter completely, so always decrement by at least one.
+            // newlyRead is at least 1 (the visible post itself); countDiff 0 would reset the unread counter.
             getMessagesController().markDialogAsRead(did, readTo, readTo, maxVisibleDates.get(did, 0), false, 0, Math.max(1, newlyRead), false, 0);
             markedAny = true;
         }
@@ -49097,14 +49093,21 @@ public class ChatActivity extends BaseFragment implements
         updatePagedownButtonVisibility(true);
     }
 
-    private boolean isNewestLoadedFolderFeedPost(long did, int realId) {
-        for (int a = 0, size = messages.size(); a < size; a++) {
-            MessageObject messageObject = messages.get(a);
-            if (messageObject.isFolderFeedMessage && messageObject.getDialogId() == did && messageObject.getRealId() > realId) {
-                return false;
+    /** Replies must be resolved within each post's own channel, not across the merged list. */
+    private void loadFolderFeedReplies(ArrayList<MessageObject> messArr) {
+        LongSparseArray<ArrayList<MessageObject>> feedRepliesByChannel = new LongSparseArray<>();
+        for (int feedIndex = 0; feedIndex < messArr.size(); feedIndex++) {
+            MessageObject feedReplyOwner = messArr.get(feedIndex);
+            ArrayList<MessageObject> feedReplyList = feedRepliesByChannel.get(feedReplyOwner.getDialogId());
+            if (feedReplyList == null) {
+                feedReplyList = new ArrayList<>();
+                feedRepliesByChannel.put(feedReplyOwner.getDialogId(), feedReplyList);
             }
+            feedReplyList.add(feedReplyOwner);
         }
-        return true;
+        for (int feedIndex = 0; feedIndex < feedRepliesByChannel.size(); feedIndex++) {
+            getMediaDataController().loadReplyMessagesForMessages(feedRepliesByChannel.valueAt(feedIndex), feedRepliesByChannel.keyAt(feedIndex), MODE_DEFAULT, 0, null, classGuid, null);
+        }
     }
 
     /** Requests the next page of newer posts when the feed was opened away from the newest ones. */
@@ -49132,10 +49135,21 @@ public class ChatActivity extends BaseFragment implements
      * read in an earlier visit look unread again and get counted off the unread count a second time.
      */
     private int getFolderFeedReadMax(long did) {
-        TLRPC.Dialog dialog = getMessagesController().dialogs_dict.get(did);
-        Integer localReadMax = getMessagesController().dialogs_read_inbox_max.get(did);
-        int readMax = Math.max(dialog != null ? dialog.read_inbox_max_id : 0, localReadMax != null ? localReadMax : 0);
-        return Math.max(readMax, folderFeedReadMax.get(did, 0));
+        return Math.max(FolderFeedController.getReadMax(currentAccount, did), folderFeedReadMax.get(did, 0));
+    }
+
+    /** In the merged feed the content protection of each post's own channel applies. */
+    private boolean isFolderFeedNoForwards(MessageObject messageObject) {
+        return chatMode == MODE_FOLDER_FEED && messageObject != null && getMessagesController().isChatNoForwards(-messageObject.getDialogId());
+    }
+
+    private boolean isAnyFolderFeedChannelNoForwards() {
+        for (TLRPC.Chat chat : FolderFeedController.getFeedChannels(currentAccount, FolderFeedController.findFilter(currentAccount, folderFeedFilterId))) {
+            if (getMessagesController().isChatNoForwards(chat)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -49146,8 +49160,7 @@ public class ChatActivity extends BaseFragment implements
         if (chatMode != MODE_FOLDER_FEED || sideControlsButtonsLayout == null) {
             return;
         }
-        int count = FolderFeedController.getFeedUnreadCount(currentAccount, FolderFeedController.findFilter(currentAccount, folderFeedFilterId));
-        folderFeedUnreadCount = count;
+        int count = FolderFeedController.getInstance(currentAccount).getUnreadCount(classGuid);
         sideControlsButtonsLayout.setButtonCount(ChatActivitySideControlsButtonsLayout.BUTTON_FEED_NEXT_UNREAD, count, animated);
         sideControlsButtonsLayout.showButton(ChatActivitySideControlsButtonsLayout.BUTTON_FEED_NEXT_UNREAD, count > 0, animated);
     }
@@ -49211,7 +49224,7 @@ public class ChatActivity extends BaseFragment implements
     }
 
     /** Reloads the merged folder feed at the newest posts. */
-    public void reloadFolderFeed() {
+    private void reloadFolderFeed() {
         if (chatMode != MODE_FOLDER_FEED) {
             return;
         }

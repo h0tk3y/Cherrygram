@@ -304,7 +304,7 @@ final class FolderFeedCache {
             // not be recorded.
             return false;
         }
-        int pageMin = page.isEmpty() ? maxId : page.get(page.size() - 1).id;
+        int pageMin = page.get(page.size() - 1).id;
         if (loadType == MessagesController.LOAD_FORWARD && maxId != 0) {
             pageMin = Math.min(pageMin, maxId);
         }
@@ -334,7 +334,8 @@ final class FolderFeedCache {
         return true;
     }
 
-    private static TLRPC.Message copyOf(TLRPC.Message message) {
+    /** A deep copy of the message carrying its real id (the feed gives shown messages synthetic ids). */
+    static TLRPC.Message copyOf(TLRPC.Message message) {
         SerializedData data = new SerializedData(message.getObjectSize());
         message.serializeToStream(data);
         SerializedData input = new SerializedData(data.toByteArray());

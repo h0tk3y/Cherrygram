@@ -36,7 +36,7 @@ import org.telegram.ui.ChatActivity;
 import org.telegram.ui.ChatActivityContainer;
 import org.telegram.ui.Components.LayoutHelper;
 
-import java.util.ArrayList;
+import java.util.List;
 
 /**
  * Screen showing the merged feed of every channel of a chat folder. The feed itself is a
@@ -101,8 +101,11 @@ public class FolderFeedActivity extends BaseFragment implements NotificationCent
 
     @Override
     public View createView(Context context) {
+        // The view can be rebuilt (e.g. on a theme change) while the fragment lives on: the new container
+        // brings a new feed, so release the previous one.
+        destroyFeed();
         MessagesController.DialogFilter filter = FolderFeedController.findFilter(currentAccount, filterId);
-        ArrayList<TLRPC.Chat> channels = FolderFeedController.getFeedChannels(currentAccount, filter);
+        List<TLRPC.Chat> channels = FolderFeedController.getFeedChannels(currentAccount, filter);
 
         actionBar.setBackButtonImage(R.drawable.ic_ab_back);
         actionBar.setAllowOverlayTitle(true);
@@ -147,7 +150,7 @@ public class FolderFeedActivity extends BaseFragment implements NotificationCent
         if (getParentActivity() == null) {
             return;
         }
-        ArrayList<TLRPC.Chat> channels = FolderFeedController.getFeedChannels(currentAccount, FolderFeedController.findFilter(currentAccount, filterId));
+        List<TLRPC.Chat> channels = FolderFeedController.getFeedChannels(currentAccount, FolderFeedController.findFilter(currentAccount, filterId));
         if (channels.isEmpty()) {
             return;
         }
@@ -221,10 +224,15 @@ public class FolderFeedActivity extends BaseFragment implements NotificationCent
     public void onFragmentDestroy() {
         getNotificationCenter().removeObserver(this, NotificationCenter.cgFolderFeedProgress);
         getNotificationCenter().removeObserver(this, NotificationCenter.cgFolderFeedLoaded);
-        // ChatActivityContainer never destroys its fragment: release its observers and the feed session.
+        destroyFeed();
+        super.onFragmentDestroy();
+    }
+
+    /** ChatActivityContainer never destroys its fragment: release its observers and the feed session. */
+    private void destroyFeed() {
         if (chatContainer != null && chatContainer.chatActivity != null && chatContainer.chatActivity.getFragmentView() != null) {
             chatContainer.chatActivity.onFragmentDestroy();
         }
-        super.onFragmentDestroy();
+        chatContainer = null;
     }
 }

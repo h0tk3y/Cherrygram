@@ -7009,7 +7009,10 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
         }
 
         viewPages[a].dialogsAdapter.setDialogsType(viewPages[a].dialogsType);
-        updateFolderFeedItem(filter.isDefault() ? null : filter);
+        if (a == 0) {
+            // Page 1 is the page a swipe is moving to: the button follows once the switch completes.
+            updateFolderFeedItem(filter.isDefault() ? null : filter);
+        }
         viewPages[a].layoutManager.scrollToPositionWithOffset(viewPages[a].dialogsType == DIALOGS_TYPE_DEFAULT && hasHiddenArchive() && viewPages[a].archivePullViewState == ARCHIVE_ITEM_STATE_HIDDEN ? 1 : 0, (int) scrollYOffset);
         checkListLoad(viewPages[a]);
     }
@@ -14449,6 +14452,7 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
         checkUi_itemDownloadsVisibility();
         checkUi_itemSpeedVisibility();
         checkUi_itemPasscodeVisibility();
+        checkUi_itemFolderFeedVisibility();
         checkUi_itemSearchVisibility();
     }
 
@@ -14964,12 +14968,23 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
         updateFolderFeedItem(getCurrentFolderFeedFilter());
     }
 
+    private boolean folderFeedItemVisible;
+
     private void updateFolderFeedItem(MessagesController.DialogFilter filter) {
+        folderFeedItemVisible = CherrygramChatsConfig.INSTANCE.showFolderFeedActionBarButton() && FolderFeedController.isAvailableForFilter(currentAccount, filter);
+        checkUi_itemFolderFeedVisibility();
+    }
+
+    /** Hidden like the other action bar items while searching, sliding or editing tabs. */
+    private void checkUi_itemFolderFeedVisibility() {
         if (folderFeedItem == null) {
             return;
         }
-        boolean show = CherrygramChatsConfig.INSTANCE.showFolderFeedActionBarButton() && FolderFeedController.isAvailableForFilter(currentAccount, filter);
-        folderFeedItem.setVisibility(show ? View.VISIBLE : View.GONE);
+        final float factor0 = folderFeedItemVisible ? 1 : 0;
+        final float factor1 = 1f - animatorSearchVisible.getFloatValue();
+        final float factor2 = 1f - getRightSlidingProgress();
+        final float factor3 = 1f - animatorDoneButtonVisible.getFloatValue();
+        FragmentFloatingButton.setAnimatedVisibility(folderFeedItem, factor0 * factor1 * factor2 * factor3);
     }
     /** Cherrygram finish */
 
