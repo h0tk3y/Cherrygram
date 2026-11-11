@@ -49166,6 +49166,63 @@ public class ChatActivity extends BaseFragment implements
         int count = FolderFeedController.getInstance(currentAccount).getUnreadCount(classGuid);
         sideControlsButtonsLayout.setButtonCount(ChatActivitySideControlsButtonsLayout.BUTTON_FEED_NEXT_UNREAD, count, animated);
         sideControlsButtonsLayout.showButton(ChatActivitySideControlsButtonsLayout.BUTTON_FEED_NEXT_UNREAD, count > 0, animated);
+        if (count > 0) {
+            scheduleFolderFeedPrefetch();
+        }
+    }
+
+    /** Waits for reading and loading to settle before deciding whether the next jump needs a prefetch. */
+    private static final long FOLDER_FEED_PREFETCH_DELAY_MS = 1000;
+    private final Runnable folderFeedPrefetchRunnable = this::prefetchFolderFeedUnreadJump;
+
+    private void scheduleFolderFeedPrefetch() {
+        AndroidUtilities.cancelRunOnUIThread(folderFeedPrefetchRunnable);
+        AndroidUtilities.runOnUIThread(folderFeedPrefetchRunnable, FOLDER_FEED_PREFETCH_DELAY_MS);
+    }
+
+    /**
+     * When the "next unread" button would reopen the feed (no unread post loaded below the screen), has
+     * that reopening prepared in the background, so the jump shows at once.
+     */
+    private void prefetchFolderFeedUnreadJump() {
+        if (chatMode != MODE_FOLDER_FEED || chatListView == null || messages.isEmpty() || firstLoading || folderFeedJumpingToUnread || isFinishing()) {
+            return;
+        }
+        FolderFeedController controller = FolderFeedController.getInstance(currentAccount);
+        if (controller.getUnreadCount(classGuid) > 0 && findFolderFeedNextUnread() == null) {
+            controller.prefetchUnreadJump(classGuid);
+        }
+    }
+
+    /**
+     * The loaded post the "next unread" button scrolls to: the oldest unread one below the screen, or, with
+     * the newest posts loaded, any loaded unread one. Null if the feed has to be reopened for it.
+     */
+    private MessageObject findFolderFeedNextUnread() {
+        // messages[0] is the newest post (bottom of the list); find the newest post on screen.
+        int newestVisibleIndex = messages.size();
+        for (int i = 0, n = chatListView.getChildCount(); i < n; i++) {
+            View child = chatListView.getChildAt(i);
+            if (child instanceof ChatMessageCell) {
+                int index = messages.indexOf(((ChatMessageCell) child).getMessageObject());
+                if (index >= 0 && index < newestVisibleIndex) {
+                    newestVisibleIndex = index;
+                }
+            }
+        }
+        for (int i = Math.min(newestVisibleIndex, messages.size()) - 1; i >= 0; i--) {
+            if (isFolderFeedUnread(messages.get(i))) {
+                return messages.get(i);
+            }
+        }
+        if (forwardEndReached[0]) {
+            for (int i = messages.size() - 1; i >= 0; i--) {
+                if (isFolderFeedUnread(messages.get(i))) {
+                    return messages.get(i);
+                }
+            }
+        }
+        return null;
     }
 
     /**
@@ -49180,39 +49237,15 @@ public class ChatActivity extends BaseFragment implements
             return;
         }
         wasManualScroll = true;
-        // messages[0] is the newest post (bottom of the list); find the newest post on screen.
-        int newestVisibleIndex = messages.size();
-        for (int i = 0, n = chatListView.getChildCount(); i < n; i++) {
-            View child = chatListView.getChildAt(i);
-            if (child instanceof ChatMessageCell) {
-                int index = messages.indexOf(((ChatMessageCell) child).getMessageObject());
-                if (index >= 0 && index < newestVisibleIndex) {
-                    newestVisibleIndex = index;
-                }
-            }
-        }
-        MessageObject target = null;
-        for (int i = Math.min(newestVisibleIndex, messages.size()) - 1; i >= 0; i--) {
-            if (isFolderFeedUnread(messages.get(i))) {
-                target = messages.get(i);
-                break;
-            }
-        }
-        if (target == null && forwardEndReached[0]) {
-            for (int i = messages.size() - 1; i >= 0; i--) {
-                if (isFolderFeedUnread(messages.get(i))) {
-                    target = messages.get(i);
-                    break;
-                }
-            }
-        }
+        MessageObject target = findFolderFeedNextUnread();
         if (target != null) {
             scrollToMessageId(target.getId(), 0, true, 0, true, 0);
             return;
         }
         if (!forwardEndReached[0] || FolderFeedController.getInstance(currentAccount).getUnreadCount(classGuid) > 0) {
             // Not loaded: reopen at the oldest unread post across the channels (with the read positions as
-            // they are now, that is the next one), like opening the feed fresh.
+            // they are now, that is the next one), like opening the feed fresh. Usually prefetched (see
+            // prefetchFolderFeedUnreadJump), so it shows at once.
             jumpToFolderFeedUnread();
             return;
         }
@@ -49238,6 +49271,7 @@ public class ChatActivity extends BaseFragment implements
             return;
         }
         folderFeedJumpingToUnread = false;
+        AndroidUtilities.cancelRunOnUIThread(folderFeedPrefetchRunnable);
         folderFeedOpenAt = openAt;
         // Synthetic ids restart with the new session: an old first-unread id could match another post.
         first_unread_id = 0;
