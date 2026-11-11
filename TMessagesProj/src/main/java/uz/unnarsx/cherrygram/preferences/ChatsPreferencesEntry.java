@@ -73,6 +73,8 @@ public class ChatsPreferencesEntry extends BaseCGPreferencesEntry {
 
     private final int notificationSoundRow = 28, vibrateInChatsRow = 29;
 
+    private final int quickFolderActionsRow = 32;
+
     private boolean expandedHeaderSettingsSection = false;
     private boolean expandedBottomBarSettingsSection = false;
 
@@ -294,6 +296,13 @@ public class ChatsPreferencesEntry extends BaseCGPreferencesEntry {
         );
         items.add(UItem.asShadow(null));
 
+        items.add(UItem.asHeader(getString(R.string.Filters)));
+        items.add(SettingsHelper.asSwitchCG(quickFolderActionsRow, applyNewSpan(getString(R.string.CG_QuickFolderActions)), getString(R.string.CG_QuickFolderActions_Desc))
+                .setChecked(CherrygramChatsConfig.INSTANCE.getQuickFolderActions())
+                .slug("quickFolderActions")
+        );
+        items.add(UItem.asShadow(null));
+
         items.add(UItem.asHeader(getString(R.string.SettingsNotifications)));
         items.add(UItem.asButton(notificationSoundRow, getString(R.string.NotificationsSound), getNotificationSoundValue())
                 .slug("notificationSound")
@@ -419,6 +428,9 @@ public class ChatsPreferencesEntry extends BaseCGPreferencesEntry {
 
                 showRestartBulletin();
             });
+        } else if (item.id == quickFolderActionsRow) {
+            CherrygramChatsConfig.INSTANCE.setQuickFolderActions(!CherrygramChatsConfig.INSTANCE.getQuickFolderActions());
+            SettingsHelper.updateCheckState(view, CherrygramChatsConfig.INSTANCE.getQuickFolderActions());
         } else if (item.id == vibrateInChatsRow) {
             showVibrationSelector(() -> {
                 try {

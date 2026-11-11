@@ -594,4 +594,8 @@
     <!--Alternative Support-->
     <!--Cherrygram screens-->
 
+    <string name="CG_QuickFolderActions">Quick folder actions</string>
+    <string name="CG_QuickFolderActions_Desc">See and change a chat\'s folders from its info screen, and add chats selected in the chat list to folders from any folder tab.</string>
+    <string name="CG_QuickFolderActions_NotInFolders">Not in any folder</string>
+
 </resources>

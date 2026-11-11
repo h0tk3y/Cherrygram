@@ -4030,64 +4030,30 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
                 } else if (id == 11) {
                     openAccountSelector(switchItem);
                 } else if (id == add_to_folder) {
-                    FiltersListBottomSheet sheet = new FiltersListBottomSheet(DialogsActivity.this, selectedDialogs);
+                    // Cherrygram: with quick folder actions, the sheet stays open: one chat can be added to and
+                    // removed from several folders in a row, several chats only added.
+                    boolean quickFolderActions = CherrygramChatsConfig.INSTANCE.getQuickFolderActions();
+                    ArrayList<Long> dialogs = new ArrayList<>(selectedDialogs);
+                    boolean[] changed = new boolean[1];
+                    FiltersListBottomSheet sheet = new FiltersListBottomSheet(DialogsActivity.this, dialogs);
+                    sheet.setStayOpen(quickFolderActions);
+                    sheet.setAddOnly(quickFolderActions && dialogs.size() > 1);
                     sheet.setDelegate((filter, checked) -> {
-                        ArrayList<Long> alwaysShow = FiltersListBottomSheet.getDialogsCount(DialogsActivity.this, filter, selectedDialogs, true, false);
-                        if (!checked) {
-                            int currentCount;
-                            if (filter != null) {
-                                currentCount = filter.alwaysShow.size();
-                            } else {
-                                currentCount = 0;
-                            }
-                            int totalCount = currentCount + alwaysShow.size();
-                            if ((totalCount > getMessagesController().dialogFiltersChatsLimitDefault && !getUserConfig().isPremium()) || totalCount > getMessagesController().dialogFiltersChatsLimitPremium) {
-                                showDialog(new LimitReachedBottomSheet(DialogsActivity.this, fragmentView.getContext(), LimitReachedBottomSheet.TYPE_CHATS_IN_FOLDER, currentAccount, null));
-                                return;
-                            }
+                        // One chat in the open sheet: its checkmarks show each change (and a second tap undoes it).
+                        UndoView undoView = quickFolderActions && dialogs.size() == 1 ? null : getUndoView();
+                        if (!FiltersListBottomSheet.applyChoice(DialogsActivity.this, dialogs, filter, checked, undoView)) {
+                            return;
                         }
-                        if (filter != null) {
-                            if (checked) {
-                                for (int a = 0; a < selectedDialogs.size(); a++) {
-                                    filter.neverShow.add(selectedDialogs.get(a));
-                                    filter.alwaysShow.remove(selectedDialogs.get(a));
-                                }
-                                FilterCreateActivity.saveFilterToServer(filter, filter.flags, filter.emoticon, filter.name, filter.entities, filter.title_noanimate, filter.color, filter.alwaysShow, filter.neverShow, filter.pinnedDialogs, false, false, true, true, false, DialogsActivity.this, null);
-                                long did;
-                                if (selectedDialogs.size() == 1) {
-                                    did = selectedDialogs.get(0);
-                                } else {
-                                    did = 0;
-                                }
-                                final UndoView undoView = getUndoView();
-                                if (undoView != null) {
-                                    undoView.showWithAction(did, UndoView.ACTION_REMOVED_FROM_FOLDER, selectedDialogs.size(), filter, null, null);
-                                }
-                            } else {
-                                if (!alwaysShow.isEmpty()) {
-                                    for (int a = 0; a < alwaysShow.size(); a++) {
-                                        filter.neverShow.remove(alwaysShow.get(a));
-                                    }
-                                    filter.alwaysShow.addAll(alwaysShow);
-                                    FilterCreateActivity.saveFilterToServer(filter, filter.flags, filter.emoticon, filter.name, filter.entities, filter.title_noanimate, filter.color, filter.alwaysShow, filter.neverShow, filter.pinnedDialogs, false, false, true, true, false, DialogsActivity.this, null);
-                                }
-                                long did;
-                                if (alwaysShow.size() == 1) {
-                                    did = alwaysShow.get(0);
-                                } else {
-                                    did = 0;
-                                }
-                                final UndoView undoView = getUndoView();
-                                if (undoView != null) {
-                                    undoView.showWithAction(did, UndoView.ACTION_ADDED_TO_FOLDER, alwaysShow.size(), filter, null, null);
-                                }
-                            }
-                        } else {
-                            presentFragment(new FilterCreateActivity(null, alwaysShow));
+                        changed[0] = true;
+                        if (!quickFolderActions || filter == null) {
+                            hideActionMode(true);
                         }
-                        hideActionMode(true);
                     });
-                    showDialog(sheet);
+                    showDialog(sheet, dialog -> {
+                        if (quickFolderActions && changed[0] && actionBar != null && actionBar.isActionModeShowed()) {
+                            hideActionMode(true);
+                        }
+                    });
                 } else if (id == remove_from_folder) {
                     MessagesController.DialogFilter filter = getMessagesController().getDialogFilters().get(viewPages[0].selectedType);
                     ArrayList<Long> neverShow = FiltersListBottomSheet.getDialogsCount(DialogsActivity.this, filter, selectedDialogs, false, false);
@@ -10204,7 +10170,10 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
             }
         }
         if (addToFolderItem != null) {
-            if (folderId == 1 || filterTabsView != null && getFilterTabsVisibilityFactor(false) > 0.5f && filterTabsView.currentTabIsDefault() && !FiltersListBottomSheet.getCanAddDialogFilters(this, selectedDialogs).isEmpty()) {
+            boolean canAddHere = folderId == 1 || filterTabsView != null && getFilterTabsVisibilityFactor(false) > 0.5f && filterTabsView.currentTabIsDefault()
+                    // Cherrygram: from any folder tab, too.
+                    || CherrygramChatsConfig.INSTANCE.getQuickFolderActions();
+            if (canAddHere && !FiltersListBottomSheet.getCanAddDialogFilters(this, selectedDialogs).isEmpty()) {
                 addToFolderItem.setVisibility(View.VISIBLE);
             } else {
                 addToFolderItem.setVisibility(View.GONE);
