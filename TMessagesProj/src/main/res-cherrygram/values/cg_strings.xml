@@ -300,6 +300,7 @@
     <string name="CG_FolderFeed_Entry_Both">Both</string>
     <string name="CG_FolderFeed_Title">All channels</string>
     <string name="CG_FolderFeed_EntrySubtitle">Read %1$s in one feed</string>
+    <string name="CG_FolderFeed_EntrySubtitle_AllChannels">Read this folder\'s channels in one feed</string>
     <string name="CG_FolderFeed_Open">Read channels together</string>
     <string name="CG_FolderFeed_Channels">Channels in this feed</string>
     <string name="CG_FolderFeed_NextUnread">Next unread post</string>

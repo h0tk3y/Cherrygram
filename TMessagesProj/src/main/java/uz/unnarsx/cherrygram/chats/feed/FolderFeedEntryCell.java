@@ -24,6 +24,7 @@ import android.widget.TextView;
 import org.telegram.messenger.AndroidUtilities;
 import org.telegram.messenger.LocaleController;
 import org.telegram.messenger.MessagesController;
+import org.telegram.messenger.NotificationCenter;
 import org.telegram.messenger.R;
 import org.telegram.ui.ActionBar.Theme;
 import org.telegram.ui.Components.CombinedDrawable;
@@ -31,7 +32,7 @@ import org.telegram.ui.Components.CounterView;
 import org.telegram.ui.Components.LayoutHelper;
 
 /** Pinned "All channels" row shown on top of a folder's chat list; opens {@link FolderFeedActivity}. */
-public class FolderFeedEntryCell extends FrameLayout {
+public class FolderFeedEntryCell extends FrameLayout implements NotificationCenter.NotificationCenterDelegate {
 
     private final ImageView imageView;
     private final TextView titleView;
@@ -40,6 +41,7 @@ public class FolderFeedEntryCell extends FrameLayout {
     private final Theme.ResourcesProvider resourcesProvider;
     private MessagesController.DialogFilter filter;
     private int account;
+    private int observedAccount = -1;
 
     public FolderFeedEntryCell(Context context, Theme.ResourcesProvider resourcesProvider) {
         super(context);
@@ -87,9 +89,65 @@ public class FolderFeedEntryCell extends FrameLayout {
         boolean sameFilter = this.filter == filter;
         this.filter = filter;
         this.account = account;
-        int count = FolderFeedController.getFeedChannelsCount(account, filter);
-        subtitleView.setText(LocaleController.formatString(R.string.CG_FolderFeed_EntrySubtitle, LocaleController.formatPluralString("CG_FolderFeed_ChannelsCount", count)));
+        if (isAttachedToWindow()) {
+            setObservedAccount(account);
+        }
+        updateSubtitle();
         updateUnreadCounter(sameFilter);
+    }
+
+    /**
+     * The chat list loads in pages (archived chats separately), so until it is complete only part of the
+     * folder's channels is known: a neutral line then, rather than a count that is too small.
+     */
+    private void updateSubtitle() {
+        CharSequence text;
+        if (FolderFeedController.areAllDialogsLoaded(account, filter)) {
+            int count = FolderFeedController.getFeedChannelsCount(account, filter);
+            text = LocaleController.formatString(R.string.CG_FolderFeed_EntrySubtitle, LocaleController.formatPluralString("CG_FolderFeed_ChannelsCount", count));
+        } else {
+            text = getString(R.string.CG_FolderFeed_EntrySubtitle_AllChannels);
+        }
+        if (!TextUtils.equals(subtitleView.getText(), text)) {
+            subtitleView.setText(text);
+        }
+    }
+
+    // The dialogs list does not rebind this row when a page of chats arrives (its diff sees the same item),
+    // so the row follows the chat list itself to replace the neutral line with the count.
+    private void setObservedAccount(int newAccount) {
+        if (observedAccount == newAccount) {
+            return;
+        }
+        if (observedAccount >= 0) {
+            NotificationCenter.getInstance(observedAccount).removeObserver(this, NotificationCenter.dialogsNeedReload);
+        }
+        observedAccount = newAccount;
+        if (newAccount >= 0) {
+            NotificationCenter.getInstance(newAccount).addObserver(this, NotificationCenter.dialogsNeedReload);
+        }
+    }
+
+    @Override
+    protected void onAttachedToWindow() {
+        super.onAttachedToWindow();
+        if (filter != null) {
+            setObservedAccount(account);
+            updateSubtitle();
+        }
+    }
+
+    @Override
+    protected void onDetachedFromWindow() {
+        super.onDetachedFromWindow();
+        setObservedAccount(-1);
+    }
+
+    @Override
+    public void didReceivedNotification(int id, int notificationAccount, Object... args) {
+        if (id == NotificationCenter.dialogsNeedReload && filter != null) {
+            updateSubtitle();
+        }
     }
 
     /** Refreshes the unread badge; called again by the dialogs list when read states change. */
