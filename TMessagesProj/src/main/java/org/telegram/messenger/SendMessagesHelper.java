@@ -2258,6 +2258,10 @@ public class SendMessagesHelper extends BaseController implements NotificationCe
         if (messages == null || messages.isEmpty()) {
             return 0;
         }
+        // Cherrygram: posts from the merged folder feed carry synthetic ids, forward the real posts.
+        if (uz.unnarsx.cherrygram.chats.feed.FolderFeedController.hasFeedMessages(messages)) {
+            return sendMessage(uz.unnarsx.cherrygram.chats.feed.FolderFeedController.withRealIds(messages), peer, forwardFromMyName, hideCaption, notify, scheduleDate, scheduleRepeatPeriod, replyToTopMsg, video_timestamp, payStars, monoForumPeerId, suggestionParams);
+        }
         int sendResult = 0;
         long myId = getUserConfig().getClientUserId();
         boolean isChannel = false;

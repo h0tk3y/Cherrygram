@@ -22,6 +22,7 @@ import android.view.View;
 
 import org.telegram.messenger.AndroidUtilities;
 import org.telegram.messenger.MessagesController;
+import org.telegram.messenger.NotificationCenter;
 import org.telegram.messenger.R;
 import org.telegram.messenger.UserObject;
 import org.telegram.tgnet.TLRPC;
@@ -72,6 +73,8 @@ public class ChatsPreferencesEntry extends BaseCGPreferencesEntry {
     private final int videoSeekSliderRow = 27;
 
     private final int notificationSoundRow = 28, vibrateInChatsRow = 29;
+
+    private final int folderFeedRow = 30, folderFeedEntryRow = 31;
 
     private boolean expandedHeaderSettingsSection = false;
     private boolean expandedBottomBarSettingsSection = false;
@@ -235,6 +238,18 @@ public class ChatsPreferencesEntry extends BaseCGPreferencesEntry {
         );
         items.add(UItem.asShadow(null));
 
+        items.add(UItem.asHeader(getString(R.string.FilterChannels)));
+        items.add(SettingsHelper.asSwitchCG(folderFeedRow, applyNewSpan(getString(R.string.CG_FolderFeed)), getString(R.string.CG_FolderFeed_Desc))
+                .setChecked(CherrygramChatsConfig.INSTANCE.getFolderChannelsFeed())
+                .slug("folderChannelsFeed")
+        );
+        if (CherrygramChatsConfig.INSTANCE.getFolderChannelsFeed()) {
+            items.add(UItem.asButton(folderFeedEntryRow, getString(R.string.CG_FolderFeed_Entry), getFolderFeedEntryValue())
+                    .slug("folderChannelsFeedEntry")
+            );
+        }
+        items.add(UItem.asShadow(null));
+
         items.add(UItem.asHeader(getString(R.string.CP_HideKbdOnScroll)));
         items.add(
                 UItem.asIntSlideView(
@@ -307,6 +322,32 @@ public class ChatsPreferencesEntry extends BaseCGPreferencesEntry {
 
     @Override
     protected void onClick(UItem item, View view, int position, float x, float y) {
+        if (item.id == folderFeedRow) {
+            CherrygramChatsConfig.INSTANCE.setFolderChannelsFeed(!CherrygramChatsConfig.INSTANCE.getFolderChannelsFeed());
+            SettingsHelper.updateCheckState(view, CherrygramChatsConfig.INSTANCE.getFolderChannelsFeed());
+            notifyFolderFeedChanged();
+            updateRows(true);
+            return;
+        } else if (item.id == folderFeedEntryRow) {
+            ArrayList<String> configStringKeys = new ArrayList<>();
+            ArrayList<Integer> configValues = new ArrayList<>();
+
+            configStringKeys.add(getString(R.string.CG_FolderFeed_Entry_Pinned));
+            configValues.add(CherrygramChatsConfig.FOLDER_FEED_ENTRY_PINNED);
+
+            configStringKeys.add(getString(R.string.CG_FolderFeed_Entry_ActionBar));
+            configValues.add(CherrygramChatsConfig.FOLDER_FEED_ENTRY_ACTION_BAR);
+
+            configStringKeys.add(getString(R.string.CG_FolderFeed_Entry_Both));
+            configValues.add(CherrygramChatsConfig.FOLDER_FEED_ENTRY_BOTH);
+
+            PopupHelper.show(configStringKeys, getString(R.string.CG_FolderFeed_Entry), configValues.indexOf(CherrygramChatsConfig.INSTANCE.getFolderChannelsFeedEntry()), getContext(), i -> {
+                CherrygramChatsConfig.INSTANCE.setFolderChannelsFeedEntry(configValues.get(i));
+                SettingsHelper.updateButtonValue(view, getFolderFeedEntryValue());
+                notifyFolderFeedChanged();
+            });
+            return;
+        }
         if (item.id == headerSettingsRow) {
             expandedHeaderSettingsSection = !expandedHeaderSettingsSection;
             item.collapsed = !item.collapsed;
@@ -736,4 +777,17 @@ public class ChatsPreferencesEntry extends BaseCGPreferencesEntry {
         }
     }
 
+
+    private void notifyFolderFeedChanged() {
+        getNotificationCenter().postNotificationName(NotificationCenter.dialogFiltersUpdated);
+        getNotificationCenter().postNotificationName(NotificationCenter.dialogsNeedReload);
+    }
+
+    private String getFolderFeedEntryValue() {
+        return switch (CherrygramChatsConfig.INSTANCE.getFolderChannelsFeedEntry()) {
+            case CherrygramChatsConfig.FOLDER_FEED_ENTRY_ACTION_BAR -> getString(R.string.CG_FolderFeed_Entry_ActionBar);
+            case CherrygramChatsConfig.FOLDER_FEED_ENTRY_BOTH -> getString(R.string.CG_FolderFeed_Entry_Both);
+            default -> getString(R.string.CG_FolderFeed_Entry_Pinned);
+        };
+    }
 }
