@@ -366,8 +366,13 @@ final class FolderFeedMerge<M> {
     /** A response to {@link #aroundQuery}, requested when the channel's liveVersion was {@code liveVersion}. */
     void onAroundPage(Channel<M> channel, List<M> messages, int anchorDate, int liveVersion, DialogTop top) {
         WindowScan<M> scan = scanWindow(messages, channel, 0, anchorDate);
+        boolean newerComplete = scan.newerCount < AROUND_NEWER;
         applyWindow(channel, scan.messages, anchorDate, scan.olderCount < AROUND_OLDER,
-                scan.newerCount < AROUND_NEWER && channel.liveVersion == liveVersion, top);
+                newerComplete && channel.liveVersion == liveVersion, top);
+        if (newerComplete && channel.liveVersion != liveVersion) {
+            // Everything from the opening point on was in the window: only posts that came since are missing.
+            nothingMissingBefore(channel, anchorDate);
+        }
         channel.aroundDone = true;
     }
 
@@ -399,6 +404,10 @@ final class FolderFeedMerge<M> {
             if (channel.probeOlderEnd || oldestDate < anchorDate) {
                 applyWindow(channel, window, anchorDate, channel.probeOlderEnd,
                         channel.probeNewerEnd && channel.liveVersion == channel.probeLiveVersion, top);
+                if (channel.probeNewerEnd && channel.liveVersion != channel.probeLiveVersion) {
+                    // As in onAroundPage: only posts that came since the probe are missing.
+                    nothingMissingBefore(channel, anchorDate);
+                }
                 channel.aroundDone = true;
                 return;
             }
@@ -694,9 +703,23 @@ final class FolderFeedMerge<M> {
             channel.newer.frontier = minDate;
         }
         if (channel.newer.offsetId != 0) {
+            if (channel.newer.exhausted) {
+                // Nothing was left after the edge: only the new posts are missing now, so nothing older than
+                // them can still come. A frontier left at the channel's last earlier post would hold back
+                // every other channel's posts after it (the first unread post the feed opens at, too).
+                nothingMissingBefore(channel, minDate);
+            }
             // The new posts arrive through forward paging, like scrolling down to newer posts.
             channel.newer.exhausted = false;
         }
+    }
+
+    /**
+     * The channel has nothing unfetched before {@code date} on its newer edge (what it still lacks is only
+     * newer), so its frontier must not hold the other channels' posts before that time back.
+     */
+    static void nothingMissingBefore(Channel<?> channel, int date) {
+        channel.newer.frontier = Math.max(channel.newer.frontier, date);
     }
 
     private HashMap<Long, Channel<M>> byDialogId(List<? extends Channel<M>> channels) {

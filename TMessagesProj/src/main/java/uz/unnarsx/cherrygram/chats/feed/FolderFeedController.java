@@ -881,6 +881,10 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
             }
             // As for the probe window, a network page confirms the newest end.
             MERGE.applyWindow(source, scan.messages, session.anchorDate, startReached, false, dialogTop(source.dialogId));
+            if (atTop && scan.newerCount == 0) {
+                // The window reaches the channel's newest message: anything still missing is newer.
+                FolderFeedMerge.nothingMissingBefore(source, session.anchorDate);
+            }
             source.aroundDone = true;
             return true;
         });
