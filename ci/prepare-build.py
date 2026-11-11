@@ -12,9 +12,6 @@ native modules) are closed-source and gitignored, and the signing key is private
      even for the debug APK, and enables ccache,
   5. makes buildSrc resolve plugins from Maven Central before the Gradle Plugin Portal.
 
-(Debug builds already switch to Telegram's test servers when the country code 999 is entered on the
-login screen, which the emulator UI test relies on.)
-
 It only edits the working tree of the CI runner; nothing here is meant to be committed.
 """
 import os
@@ -75,14 +72,9 @@ def main():
         "        release {\n            storeFile file('../Your_Key.jks')\n            storePassword 'Your_Password'\n            keyAlias 'Your_Alias'\n            keyPassword 'Your_Password'\n        }\n",
         "        release {\n            storeFile file('../Your_Key.jks')\n            storePassword 'Your_Password'\n            keyAlias 'Your_Alias'\n            keyPassword 'Your_Password'\n            enableV1Signing true\n            enableV2Signing true\n            enableV3Signing true\n        }\n",
     )
-    with open(app_gradle, encoding="utf-8") as f:
-        text = f.read()
-    marker = "        afat {\n            ndk {\n                //noinspection ChromeOsAbiSupport\n                abiFilters \"armeabi-v7a\", \"arm64-v8a\"/*, \"x86\", \"x86_64\"*/\n"
-    if text.count(marker) != 1:
-        sys.exit("prepare-build: afat abiFilters not found in TMessagesProj_App/build.gradle")
-    text = text.replace(marker, marker.replace('abiFilters "armeabi-v7a", "arm64-v8a"/*, "x86", "x86_64"*/', 'abiFilters "arm64-v8a", "x86_64"'))
-    with open(app_gradle, "w", encoding="utf-8") as f:
-        f.write(text)
+    # Only the afat flavor's filter (the same line also appears in other flavors).
+    afat_abis = "        afat {\n            ndk {\n                //noinspection ChromeOsAbiSupport\n                abiFilters \"armeabi-v7a\", \"arm64-v8a\"/*, \"x86\", \"x86_64\"*/\n"
+    replace_once(app_gradle, afat_abis, afat_abis.replace('abiFilters "armeabi-v7a", "arm64-v8a"/*, "x86", "x86_64"*/', 'abiFilters "arm64-v8a", "x86_64"'))
 
     # buildSrc's `kotlin-dsl` plugin (and the Kotlin compiler it pulls in) resolves through plugin
     # management, which defaults to the Gradle Plugin Portal only. The portal redirects JetBrains

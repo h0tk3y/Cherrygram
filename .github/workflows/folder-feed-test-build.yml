@@ -1,11 +1,12 @@
-# Builds an installable test APK of the merged folder channels feed branch and checks the feature
-# on an emulator. Not the official release pipeline: closed-source parts are replaced by stubs
-# (see ci/), and the APK is signed with a throwaway key (ci/ci-test-signing.jks).
+# Builds an installable test APK of the merged folder channels feed branch and smoke-tests it on an
+# emulator. Not the official release pipeline: closed-source parts are replaced by stubs (see ci/),
+# and the APK is signed with a throwaway key (ci/ci-test-signing.jks).
 #
 # Optional repository secrets:
-#   TG_APP_ID, TG_APP_HASH  your API id/hash from https://my.telegram.org. Used by the APK and by the
-#                           emulator test (which logs in to Telegram's *test* servers). Without them
-#                           both fall back to upstream Telegram's public defaults (DEFAULT_TG_APP_*).
+#   TG_APP_ID, TG_APP_HASH  your API id/hash from https://my.telegram.org, used by the APK. Without them
+#                           it falls back to upstream Telegram's public defaults (DEFAULT_TG_APP_*).
+#                           Note: they are compiled into the APK, which is published as a public
+#                           pre-release, so anyone who downloads it can read them.
 name: Folder feed test build
 
 on:
@@ -16,15 +17,17 @@ on:
       - '**.md'
   workflow_dispatch:
 
+# One pipeline at a time, whatever the ref: every run publishes the same release.
 concurrency:
-  group: folder-feed-${{ github.ref }}
+  group: folder-feed
   cancel-in-progress: true
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   APP_PACKAGE: uz.unnarsx.cherrygram.beta
+  APK_NAME: Cherrygram-folder-feed-test.apk
   # Telegram's public Android API credentials, as shipped in upstream Telegram's open source
   # (TMessagesProj/src/main/java/org/telegram/messenger/BuildVars.java). Used when the TG_APP_ID /
   # TG_APP_HASH secrets are not set; personal test builds only.
@@ -34,7 +37,9 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 330
+    timeout-minutes: 180
+    permissions:
+      contents: write # publishes the pre-release
     steps:
       - name: Free disk space
         run: |
@@ -46,6 +51,7 @@ jobs:
         with:
           submodules: recursive
           fetch-depth: 1
+          persist-credentials: false
 
       - uses: actions/setup-java@v4
         with:
@@ -72,6 +78,9 @@ jobs:
       # it is not executed: install the official Gradle version it pins and run `gradle` instead.
       # Downloaded with retries and mirror fallbacks (Gradle's download host returned HTTP 504),
       # accepted only if it matches the official checksum from https://gradle.org/release-checksums/.
+      # No Gradle User Home cache: a cache saved by a failed run kept a stale GitHub release URL for a
+      # Maven Central artifact. Dependencies come fresh from Maven Central/Google each run; the slow
+      # native build has its own ccache.
       - name: Install Gradle 8.13
         run: |
           SHA=20f1b1176237254a6fc204d8434196fa11a4cfb387567519c61556e8710aed78
@@ -95,14 +104,6 @@ jobs:
           unzip -q "$ZIP" -d "$RUNNER_TEMP/gradle"
           echo "$RUNNER_TEMP/gradle/gradle-8.13/bin" >> "$GITHUB_PATH"
 
-      # No Gradle User Home cache: a cache saved by a failed run kept a stale GitHub release URL for a
-      # Maven Central artifact. Dependencies come fresh from Maven Central/Google each run; the slow
-      # native build has its own ccache.
-      - uses: gradle/actions/setup-gradle@v4
-        with:
-          validate-wrappers: false
-          cache-disabled: true
-
       - name: Prepare sources (stubs, signing, ABIs)
         env:
           TG_APP_ID: ${{ secrets.TG_APP_ID || env.DEFAULT_TG_APP_ID }}
@@ -110,6 +111,7 @@ jobs:
         run: python3 ci/prepare-build.py
 
       - name: Build test APK
+        id: build
         env:
           CCACHE_DIR: /home/runner/.cache/ccache
           CCACHE_BASEDIR: ${{ github.workspace }}
@@ -120,31 +122,31 @@ jobs:
           gradle --version
           # Google's mirror of Maven Central first: Maven Central redirected Kotlin compiler jars to
           # GitHub release downloads, which fail from runners (HTTP 502/504).
-          gradle --init-script ci/gradle-mirror.init.gradle :TMessagesProj_App:assembleAfatDebug -PAPP_PACKAGE=$APP_PACKAGE --stacktrace --no-daemon --refresh-dependencies
+          gradle --init-script ci/gradle-mirror.init.gradle :TMessagesProj_App:assembleAfatDebug -PAPP_PACKAGE=$APP_PACKAGE --stacktrace --no-daemon
           ccache -s || true
 
-      # Saved even when a later (Java/Kotlin) step fails, so the slow native build is reused.
+      # Saved even when a later (Java/Kotlin) part of the build fails, so the slow native build is
+      # reused, but not when the build never started.
       - name: Save ccache
-        if: always()
+        if: always() && steps.build.outcome != 'skipped'
         uses: actions/cache/save@v4
         with:
           path: ~/.cache/ccache
           key: ccache-${{ hashFiles('TMessagesProj/jni/CMakeLists.txt', 'ci/native-stubs/**', 'ci/prepare-build.py') }}-${{ github.sha }}
 
-      - name: Collect APK
-        id: apk
+      - name: Collect and verify APK
         run: |
+          set -o pipefail
           mkdir -p apk-out
           SRC=$(find TMessagesProj_App/build/outputs/apk -name '*.apk' | head -n 1)
-          NAME="Cherrygram-folder-feed-test-${GITHUB_SHA::7}.apk"
-          cp "$SRC" "apk-out/$NAME"
+          cp "$SRC" "apk-out/$APK_NAME"
           ls -la apk-out
-          echo "name=$NAME" >> "$GITHUB_OUTPUT"
           BT="$ANDROID_HOME/build-tools/36.0.0"
+          "$BT/apksigner" verify "apk-out/$APK_NAME"
           echo "::group::APK details"
-          sha256sum "apk-out/$NAME"
-          "$BT/apksigner" verify --verbose --print-certs "apk-out/$NAME" | head -n 20
-          "$BT/aapt2" dump badging "apk-out/$NAME" | grep -E "^(package|minSdkVersion|sdkVersion|targetSdkVersion|native-code|uses-split)" || true
+          sha256sum "apk-out/$APK_NAME"
+          "$BT/apksigner" verify --verbose --print-certs "apk-out/$APK_NAME" | head -n 20
+          "$BT/aapt2" dump badging "apk-out/$APK_NAME" | grep -E "^(package|minSdkVersion|sdkVersion|targetSdkVersion|native-code|uses-split)" || true
           echo "::endgroup::"
 
       - uses: actions/upload-artifact@v4
@@ -153,15 +155,27 @@ jobs:
           path: apk-out/*.apk
           retention-days: 14
 
+      # The release is kept and its APK replaced, so the download link
+      # releases/download/folder-feed-test/Cherrygram-folder-feed-test.apk stays the same and never
+      # disappears, even if a run fails or is cancelled halfway.
       - name: Publish rolling pre-release (direct download link for phones)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release delete folder-feed-test --yes --cleanup-tag || true
-          gh release create folder-feed-test "apk-out/${{ steps.apk.outputs.name }}" \
-            --prerelease --target "$GITHUB_SHA" \
-            --title "Folder feed test build (${GITHUB_SHA::7})" \
-            --notes "Test build of the merged folder channels feed from branch ${GITHUB_REF_NAME} (commit ${GITHUB_SHA}). Package ${APP_PACKAGE} (installs next to regular Cherrygram), signed with a throwaway CI key, closed-source Cherrygram extras stubbed out. Not an official build."
+          set -o pipefail
+          TAG=folder-feed-test
+          TITLE="Folder feed test build (${GITHUB_SHA::7})"
+          NOTES="Test build of the merged folder channels feed from branch ${GITHUB_REF_NAME} (commit ${GITHUB_SHA}). Package ${APP_PACKAGE} (installs next to regular Cherrygram), signed with a throwaway CI key, closed-source Cherrygram extras stubbed out. Not an official build."
+          if ! gh release view "$TAG" -R "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release create "$TAG" -R "$GITHUB_REPOSITORY" --prerelease --target "$GITHUB_SHA" --title "$TITLE" --notes "$NOTES"
+          fi
+          gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/$TAG" -f sha="$GITHUB_SHA" -F force=true > /dev/null
+          gh release upload "$TAG" "apk-out/$APK_NAME" -R "$GITHUB_REPOSITORY" --clobber
+          # Older builds were uploaded under per-commit names.
+          gh release view "$TAG" -R "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' | while read -r name; do
+            if [ "$name" != "$APK_NAME" ]; then gh release delete-asset "$TAG" "$name" -R "$GITHUB_REPOSITORY" --yes; fi
+          done
+          gh release edit "$TAG" -R "$GITHUB_REPOSITORY" --title "$TITLE" --notes "$NOTES"
 
   emulator-test:
     needs: build
@@ -171,6 +185,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 1
+          persist-credentials: false
 
       - uses: actions/download-artifact@v4
         with:
@@ -183,28 +198,9 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
-      - name: Prepare test-server account
-        env:
-          TG_APP_ID: ${{ secrets.TG_APP_ID || env.DEFAULT_TG_APP_ID }}
-          TG_APP_HASH: ${{ secrets.TG_APP_HASH || env.DEFAULT_TG_APP_HASH }}
-        run: |
-          mkdir -p account
-          if [ -n "$TG_APP_ID" ] && [ -n "$TG_APP_HASH" ]; then
-            pip install -q telethon
-            python3 ci/emulator/tg_test_account.py setup --out account || echo "account setup failed"
-          else
-            echo "TG_APP_ID/TG_APP_HASH not set: smoke test only"
-          fi
-
-      - name: Run UI test on emulator
-        uses: reactivecircus/android-emulator-runner@v2
-        env:
-          TG_APP_ID: ${{ secrets.TG_APP_ID || env.DEFAULT_TG_APP_ID }}
-          TG_APP_HASH: ${{ secrets.TG_APP_HASH || env.DEFAULT_TG_APP_HASH }}
+      - name: Smoke test on emulator
+        # v2.38.0, pinned: a third-party action running next to the APK.
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d
         with:
           api-level: 34
           target: google_apis
@@ -214,7 +210,7 @@ jobs:
           disk-size: 4096M
           disable-animations: true
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -no-snapshot
-          script: python3 ci/emulator/ui_test.py --apk "$(ls apk/*.apk | head -n 1)" --out ci-out --account account --package "$APP_PACKAGE"
+          script: python3 ci/emulator/ui_test.py --apk "apk/$APK_NAME" --out ci-out --package "$APP_PACKAGE"
 
       - uses: actions/upload-artifact@v4
         if: always()
@@ -223,14 +219,26 @@ jobs:
           path: ci-out
           retention-days: 14
 
+  # Separate job, so the emulator job (third-party action, the APK) only has a read-only token.
+  publish-screenshots:
+    needs: emulator-test
+    if: always() && needs.emulator-test.result != 'skipped'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: emulator-screenshots
+          path: ci-out
+
       - name: Publish screenshots to the ci-screenshots branch
-        if: always()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           [ -d ci-out ] || exit 0
           cd ci-out
-          rm -f mainconfig.xml
           git init -q
           git checkout -q -b ci-screenshots
           git config user.name "github-actions"
