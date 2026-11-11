@@ -108,6 +108,8 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
     private int maxParallel = MAX_PARALLEL_REQUESTS;
     /** After a FLOOD_WAIT the parallelism stays low until this time (elapsedRealtime), then recovers step by step. */
     private long floodCalmUntil;
+    /** No new request is started before this time (elapsedRealtime): the server asked to wait. */
+    private long floodPauseUntil;
 
     private FolderFeedController(int account) {
         currentAccount = account;
@@ -284,7 +286,10 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
         /** Bumped when the channel gets a new post, so a newer-edge response built before it does not
          *  mark the edge as exhausted for good. */
         int liveVersion;
-        /** Opening: a window of this channel came from the local cache (for the open stats). */
+        /** Opening, for the open stats: the local cache was asked for this channel, had posts of it,
+         *  and gave a usable window. */
+        boolean cacheAsked;
+        boolean cacheHadPosts;
         boolean fromCache;
 
         Source(long dialogId, TLRPC.InputPeer peer) {
@@ -344,6 +349,7 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
         /** How the opening went, for {@link #getOpenStats(int)}. */
         final long startTime = SystemClock.elapsedRealtime();
         int requestsSent;
+        boolean resumeScheduled;
         int floodWaits;
         int floodWaitSeconds;
         String openStats;
@@ -455,14 +461,20 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
 
     private void recordOpenStats(Session session) {
         float seconds = (SystemClock.elapsedRealtime() - session.startTime) / 1000f;
-        int fromCache = 0;
+        int fromCache = 0, nothingCached = 0, notCovering = 0;
         for (Source source : session.sources) {
             if (source.fromCache) {
                 fromCache++;
+            } else if (source.cacheAsked) {
+                if (source.cacheHadPosts) {
+                    notCovering++;
+                } else {
+                    nothingCached++;
+                }
             }
         }
         session.openStats = LocaleController.formatString(R.string.CG_FolderFeed_OpenStats, seconds, fromCache,
-                session.sources.size(), session.requestsSent, session.floodWaits, session.floodWaitSeconds);
+                session.sources.size(), nothingCached, notCovering, session.requestsSent, session.floodWaits, session.floodWaitSeconds);
         FileLog.d("FolderFeed: " + session.openStats);
     }
 
@@ -637,7 +649,7 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
                 continue;
             }
             allDone = false;
-            if (!source.opening.inFlight && inFlight < maxParallel) {
+            if (!source.opening.inFlight && inFlight < maxParallel && !isFloodPaused(session)) {
                 if (around) {
                     loadAround(session, source);
                 } else {
@@ -786,9 +798,14 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
             for (int i = 0; i < session.sources.size(); i++) {
                 Source source = session.sources.get(i);
                 ArrayList<TLRPC.Message> window = windows.get(source.dialogId);
-                if (hasCacheResult(source, kind) || window == null || window.isEmpty()) {
+                if (hasCacheResult(source, kind) || window == null) {
                     continue;
                 }
+                source.cacheAsked = true;
+                if (window.isEmpty()) {
+                    continue;
+                }
+                source.cacheHadPosts = true;
                 if (handler.onWindow(source, window, versions[i])) {
                     source.fromCache = true;
                 }
@@ -1061,7 +1078,7 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
             Collections.sort(candidates, (a, b) -> Integer.compare(b.older.frontier, a.older.frontier));
         }
         int inFlight = inFlightCount(session);
-        for (int i = 0; i < candidates.size() && inFlight < maxParallel; i++, inFlight++) {
+        for (int i = 0; i < candidates.size() && inFlight < maxParallel && !isFloodPaused(session); i++, inFlight++) {
             fetchEdge(session, candidates.get(i), newer);
         }
         // pump() runs again whenever a request completes.
@@ -1316,7 +1333,10 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
                 session.floodWaitSeconds = Math.max(session.floodWaitSeconds, seconds);
             } catch (NumberFormatException ignore) {
             }
-            floodCalmUntil = SystemClock.elapsedRealtime() + delay + FLOOD_CALM_MS;
+            long now = SystemClock.elapsedRealtime();
+            // Every request would get the same answer meanwhile: pause them all, not just this one.
+            floodPauseUntil = Math.max(floodPauseUntil, now + delay);
+            floodCalmUntil = now + delay + FLOOD_CALM_MS;
         }
         // Keep the slot occupied while waiting, so pump() does not start the same request again.
         slot.inFlight = true;
@@ -1324,6 +1344,22 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
             slot.inFlight = false;
             pump(session);
         }, delay);
+        return true;
+    }
+
+    /** Whether requests are paused after a FLOOD_WAIT; if so, the session is driven on when the pause ends. */
+    private boolean isFloodPaused(Session session) {
+        long wait = floodPauseUntil - SystemClock.elapsedRealtime();
+        if (wait <= 0) {
+            return false;
+        }
+        if (!session.resumeScheduled) {
+            session.resumeScheduled = true;
+            AndroidUtilities.runOnUIThread(() -> {
+                session.resumeScheduled = false;
+                pump(session);
+            }, wait);
+        }
         return true;
     }
 
