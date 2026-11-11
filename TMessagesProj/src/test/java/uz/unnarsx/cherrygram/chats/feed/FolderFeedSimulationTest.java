@@ -25,6 +25,10 @@ public class FolderFeedSimulationTest {
     private static final int[] PARALLEL = {1, 2, 8};
     private static final int START = 1_700_000_000;
 
+    private static Post p(long dialogId, int id, int date) {
+        return Post.post(dialogId, id, date);
+    }
+
     private static String context(int seed, int parallel) {
         return "seed " + seed + ", parallel " + parallel;
     }
@@ -124,6 +128,87 @@ public class FolderFeedSimulationTest {
                 }
             }
         }
+    }
+
+    @Test
+    public void channelCreatedAfterTheSavedPositionReopensFromMemoryWithoutRequests() {
+        FakeHistory server = new FakeHistory();
+        long old = -1, other = -2, young = -3;
+        for (int i = 1; i <= 80; i++) {
+            server.add(p(old, i, START + 100 * i));
+            server.add(p(other, i, START + 100 * i + 50));
+        }
+        // Created long after the saved position: "channel created" is its first message.
+        server.add(Post.service(young, 1, START + 6_000));
+        for (int i = 2; i <= 30; i++) {
+            server.add(p(young, i, START + 6_000 + 10 * i));
+        }
+        Post saved = server.history(old).get(20);
+        java.util.Map<Long, FolderFeedCacheCore.Stretches<Post>> memory = new java.util.HashMap<>();
+
+        FeedDriver first = new FeedDriver(server, new Random(3), 4);
+        first.memory = memory;
+        first.openAtSaved(saved.dialogId, saved.id, saved.date);
+        assertEquals("the first time the young channel is fetched", Integer.valueOf(1), first.requestsByChannel.get(young));
+        first.pageToEnd(true);
+        first.assertOrdered();
+
+        FeedDriver second = new FeedDriver(server, new Random(4), 4);
+        second.memory = memory;
+        second.openAtSaved(saved.dialogId, saved.id, saved.date);
+        assertTrue("its remembered window starts at its first message", second.fromMemory.contains(young));
+        assertEquals("no request for it on reopening", null, second.requestsByChannel.get(young));
+        assertTrue(second.channel(young).older.exhausted);
+        second.pageToEnd(true);
+        second.pageToEnd(false);
+        second.assertCompleteAndOrdered();
+        assertEquals("neither its opening window nor older posts were requested", null, second.olderRequestsByChannel.get(young));
+        assertTrue("at most one page confirms its newest end", second.requestsByChannel.get(young) == null || second.requestsByChannel.get(young) <= 1);
+    }
+
+    @Test
+    public void reopeningFromMemoryStillShowsEveryPostInOrder() {
+        int servedFromMemory = 0, startReached = 0;
+        for (int seed = 0; seed < SEEDS; seed++) {
+            Random rng = new Random(seed * 101L);
+            FakeHistory server = FakeHistory.random(rng, 2 + rng.nextInt(7), 150, START);
+            List<Post> all = server.allPosts();
+            if (all.isEmpty()) {
+                continue;
+            }
+            java.util.Map<Long, FolderFeedCacheCore.Stretches<Post>> memory = new java.util.HashMap<>();
+            try {
+                // Several feeds opened one after another in the same app session, each scrolled a bit.
+                for (int visit = 0; visit < 3; visit++) {
+                    Post saved = all.get(rng.nextInt(all.size()));
+                    FeedDriver feed = new FeedDriver(server, rng, 1 + rng.nextInt(8));
+                    feed.memory = memory;
+                    feed.openAtSaved(saved.dialogId, saved.id, saved.date);
+                    servedFromMemory += feed.fromMemory.size();
+                    for (Long dialogId : feed.fromMemory) {
+                        if (feed.channel(dialogId).older.exhausted) {
+                            startReached++;
+                        }
+                    }
+                    if (visit < 2) {
+                        for (int pages = rng.nextInt(6); pages > 0 && (feed.hasMore(false) || feed.hasMore(true)); pages--) {
+                            feed.page(feed.hasMore(true) && (!feed.hasMore(false) || rng.nextBoolean()));
+                        }
+                        feed.settle();
+                        feed.assertOrdered();
+                    } else {
+                        while (feed.hasMore(false) || feed.hasMore(true)) {
+                            feed.page(feed.hasMore(true) && (!feed.hasMore(false) || rng.nextBoolean()));
+                        }
+                        feed.assertCompleteAndOrdered();
+                    }
+                }
+            } catch (AssertionError e) {
+                throw new AssertionError("seed " + seed + ": " + e.getMessage(), e);
+            }
+        }
+        assertTrue("windows came from memory: " + servedFromMemory, servedFromMemory > SEEDS);
+        assertTrue("some at the start of history: " + startReached, startReached > 0);
     }
 
     @Test

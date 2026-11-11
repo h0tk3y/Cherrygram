@@ -38,6 +38,17 @@ final class FeedDriver {
     FolderFeedMerge.Initial<Post> initial;
     /** Requests sent, for checks on how much the feed fetches. */
     int requests;
+    /** Requests sent per channel: all of them, and those for the opening windows or older posts only. */
+    final java.util.HashMap<Long, Integer> requestsByChannel = new java.util.HashMap<>();
+    final java.util.HashMap<Long, Integer> olderRequestsByChannel = new java.util.HashMap<>();
+    /**
+     * The in-memory stretches of this app session ({@link FolderFeedCacheCore.Stretches} per channel), shared
+     * between feeds opened one after another, or null to run without them. Pages are recorded the way
+     * FolderFeedCache.write records them for the controller.
+     */
+    java.util.Map<Long, FolderFeedCacheCore.Stretches<Post>> memory;
+    /** Channels whose starting window came from the memory. */
+    final java.util.HashSet<Long> fromMemory = new java.util.HashSet<>();
 
     private static final class Pending {
         final Channel<Post> channel;
@@ -131,8 +142,10 @@ final class FeedDriver {
         }
         java.util.Collections.shuffle(probes, rng);
         for (Channel<Post> channel : probes) {
-            requests++;
-            merge.onProbePage(channel, server.getHistory(channel.dialogId, FolderFeedMerge.probeQuery(channel)), channel.liveVersion);
+            List<Post> response = server.getHistory(channel.dialogId, FolderFeedMerge.probeQuery(channel));
+            count(channel);
+            merge.onProbePage(channel, response, channel.liveVersion);
+            remember(channel, response, false, 0, channel.probeOlderEnd);
         }
         anchorDate = FolderFeedMerge.anchorFromProbes(channels);
         if (anchorDate == 0) {
@@ -155,16 +168,105 @@ final class FeedDriver {
                 needed.add(channel);
             }
         }
+        readAroundFromMemory(needed);
         java.util.Collections.shuffle(needed, rng);
         for (Channel<Post> channel : needed) {
-            requests++;
-            merge.onAroundPage(channel, server.getHistory(channel.dialogId, FolderFeedMerge.aroundQuery(anchorDate)), anchorDate,
-                    channel.liveVersion, server.top(channel.dialogId));
+            if (channel.aroundDone) {
+                continue;
+            }
+            List<Post> response = server.getHistory(channel.dialogId, FolderFeedMerge.aroundQuery(anchorDate));
+            count(channel);
+            merge.onAroundPage(channel, response, anchorDate, channel.liveVersion, server.top(channel.dialogId));
+            remember(channel, response, false, 0, channel.older.exhausted);
         }
         for (Channel<Post> channel : channels) {
             assertTrue("every channel has its starting window", channel.aroundDone);
         }
     }
+
+    /** FolderFeedController.readAroundCache, from the memory: windows around the opening point that cover it. */
+    private void readAroundFromMemory(List<Channel<Post>> needed) {
+        if (memory == null) {
+            return;
+        }
+        for (Channel<Post> channel : needed) {
+            FolderFeedCacheCore.Stretches<Post> stretches = memory.get(channel.dialogId);
+            List<Post> window = stretches != null
+                    ? stretches.window(0, anchorDate, FolderFeedMerge.AROUND_OLDER, FolderFeedMerge.AROUND_NEWER, 0) : null;
+            if (window == null || window.isEmpty()) {
+                continue;
+            }
+            boolean startReached = stretches.reachesStart(window);
+            FolderFeedMerge.WindowScan<Post> scan = merge.scanWindow(window, channel, 0, anchorDate);
+            FolderFeedMerge.DialogTop top = server.top(channel.dialogId);
+            boolean atTop = scan.maxId >= top.topMessage;
+            if (FolderFeedMerge.aroundCacheVerdict(scan, atTop, startReached) == FolderFeedMerge.CACHE_USABLE) {
+                merge.applyWindow(channel, scan.messages, anchorDate, startReached, false, top);
+                channel.aroundDone = true;
+                fromMemory.add(channel.dialogId);
+            }
+        }
+    }
+
+    private void count(Channel<Post> channel) {
+        count(channel, false);
+    }
+
+    private void count(Channel<Post> channel, boolean newer) {
+        requests++;
+        Integer n = requestsByChannel.get(channel.dialogId);
+        requestsByChannel.put(channel.dialogId, n == null ? 1 : n + 1);
+        if (!newer) {
+            n = olderRequestsByChannel.get(channel.dialogId);
+            olderRequestsByChannel.put(channel.dialogId, n == null ? 1 : n + 1);
+        }
+    }
+
+    /**
+     * What FolderFeedCache.write keeps in memory for a fetched page: the channel's messages, a backward page
+     * continuing the stretch of its offset post, and whether the page reaches the channel's first message.
+     */
+    private void remember(Channel<Post> channel, List<Post> response, boolean backward, int requestOffsetId, boolean reachesStart) {
+        if (memory == null) {
+            return;
+        }
+        ArrayList<Post> copies = new ArrayList<>();
+        for (Post post : response) {
+            if (!post.empty && post.dialogId == channel.dialogId) {
+                copies.add(post);
+            }
+        }
+        FolderFeedCacheCore.Stretches<Post> stretches = memory.get(channel.dialogId);
+        if (stretches == null) {
+            stretches = new FolderFeedCacheCore.Stretches<>(MEMORY_IDS);
+            memory.put(channel.dialogId, stretches);
+        }
+        if (copies.isEmpty()) {
+            if (reachesStart && backward) {
+                stretches.remember(copies, requestOffsetId, 0, true);
+            }
+            return;
+        }
+        java.util.Collections.sort(copies, (a, b) -> Integer.compare(b.id, a.id));
+        stretches.remember(copies, backward ? requestOffsetId : 0, 0, reachesStart);
+    }
+
+    static final FolderFeedCacheCore.Ids<Post> MEMORY_IDS = new FolderFeedCacheCore.Ids<Post>() {
+        @Override
+        public int id(Post message) {
+            return message.id;
+        }
+
+        @Override
+        public int date(Post message) {
+            return message.date;
+        }
+
+        @Override
+        public Post copy(Post message) {
+            return new Post(message.dialogId, message.id, message.date, message.service, message.empty);
+        }
+    };
 
     private void recordInitial(List<Post> page, int topId) {
         assertTrue("first page", shown.isEmpty());
@@ -251,7 +353,7 @@ final class FeedDriver {
         assertFalse("no request on an exhausted edge", edge.exhausted);
         FolderFeedMerge.Query query = FolderFeedMerge.edgeQuery(channel, newer);
         edge.inFlight = true;
-        requests++;
+        count(channel, newer);
         // The response is built now: posts that arrive later are not in it.
         pending.add(new Pending(channel, newer, query.offsetId, channel.liveVersion, anchorDate, server.getHistory(channel.dialogId, query)));
     }
@@ -259,6 +361,11 @@ final class FeedDriver {
     private void deliver(Pending response) {
         response.channel.edge(response.newer).inFlight = false;
         merge.onEdgePage(response.channel, response.newer, response.requestOffsetId, response.response, response.anchorDate, response.liveVersion);
+        // As FolderFeedController.fetchEdge saves the page: an older page that exhausts the edge reached the
+        // channel's first message.
+        boolean reachesStart = !response.newer && response.channel.older.exhausted;
+        boolean backward = !response.newer && response.requestOffsetId != 0;
+        remember(response.channel, response.response, backward, response.requestOffsetId, response.newer ? false : reachesStart);
     }
 
     /** Delivers every response still in flight (as when the user stops scrolling). */

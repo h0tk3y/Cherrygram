@@ -528,6 +528,27 @@ public class FolderFeedMergeTest {
     }
 
     @Test
+    public void cachedWindowsThatReachTheStartOfHistoryNeedNoEarlierPosts() {
+        Channel<Post> a = channel(A);
+        // A channel created after the opening point: its cached window has nothing before it.
+        FolderFeedMerge.WindowScan<Post> afterPoint = merge.scanWindow(Arrays.asList(p(A, 3, 130), Post.service(A, 1, 120)), a, 0, 115);
+        assertEquals(FolderFeedMerge.CACHE_MISS_NO_EARLIER, FolderFeedMerge.aroundCacheVerdict(afterPoint, false, false));
+        assertEquals(FolderFeedMerge.CACHE_USABLE, FolderFeedMerge.aroundCacheVerdict(afterPoint, false, true));
+        assertEquals("the 2-argument form does not know the start", FolderFeedMerge.CACHE_MISS_NO_EARLIER, FolderFeedMerge.aroundCacheVerdict(afterPoint, false));
+        // Reaching the start does not stand in for the newer side.
+        FolderFeedMerge.WindowScan<Post> olderOnly = merge.scanWindow(Arrays.asList(p(A, 2, 110), Post.service(A, 1, 100)), a, 0, 115);
+        assertEquals(FolderFeedMerge.CACHE_MISS_NO_LATER, FolderFeedMerge.aroundCacheVerdict(olderOnly, false, true));
+
+        // Read pointer before the channel's first cached message, which is its first message.
+        FolderFeedMerge.WindowScan<Post> probe = merge.scanWindow(Arrays.asList(p(A, 12, 12), p(A, 11, 11)), a, 5, 0);
+        assertEquals(FolderFeedMerge.CACHE_MISS_NO_EARLIER, FolderFeedMerge.probeCacheVerdict(probe, 5, false));
+        assertEquals(FolderFeedMerge.CACHE_USABLE, FolderFeedMerge.probeCacheVerdict(probe, 5, true));
+        assertEquals(FolderFeedMerge.CACHE_MISS_NO_EARLIER, FolderFeedMerge.probeCacheVerdict(probe, 5));
+        FolderFeedMerge.WindowScan<Post> noUnreadPost = merge.scanWindow(Arrays.asList(Post.service(A, 11, 11)), a, 5, 0);
+        assertEquals(FolderFeedMerge.CACHE_MISS_NO_LATER, FolderFeedMerge.probeCacheVerdict(noUnreadPost, 5, true));
+    }
+
+    @Test
     public void seedLatestOnlyFromTheTopOfHistory() {
         List<Post> cached = Arrays.asList(p(A, 9, 90), Post.service(A, 8, 80), p(A, 7, 70));
         Channel<Post> a = channel(A);

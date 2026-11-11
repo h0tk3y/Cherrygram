@@ -1,6 +1,7 @@
 package uz.unnarsx.cherrygram.chats.feed;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotSame;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
@@ -263,6 +264,82 @@ public class FolderFeedCacheCoreTest {
         assertEquals(1, stretches.list.size());
         assertEquals(1, stretches.list.get(0).minId());
         assertEquals("the top goes now", 120, stretches.list.get(0).maxId());
+    }
+
+    @Test
+    public void startOfHistoryIsKnownOnlyForWindowsReachingTheStretchBottom() {
+        FolderFeedCacheCore.Stretches<Msg> stretches = new FolderFeedCacheCore.Stretches<>(IDS);
+        stretches.remember(page(1, 30), 0, 1, true);
+        assertTrue(stretches.reachesStart(stretches.window(5, 0, 10, 10, 2)));
+        assertFalse("the window ends above the first message", stretches.reachesStart(stretches.window(25, 0, 5, 5, 3)));
+        assertFalse(stretches.reachesStart(null));
+        assertFalse(stretches.reachesStart(new ArrayList<Msg>()));
+
+        FolderFeedCacheCore.Stretches<Msg> unknown = new FolderFeedCacheCore.Stretches<>(IDS);
+        unknown.remember(page(1, 30), 0, 1);
+        assertFalse("the 3-argument form does not mark the start", unknown.reachesStart(unknown.window(5, 0, 10, 10, 2)));
+    }
+
+    @Test
+    public void startFlagFollowsTheOldestPartWhenStretchesMerge() {
+        FolderFeedCacheCore.Stretches<Msg> stretches = new FolderFeedCacheCore.Stretches<>(IDS);
+        stretches.remember(page(10, 30), 0, 1, true);
+        stretches.remember(page(25, 50), 0, 2, false); // newer page: the bottom is still the start
+        assertEquals(1, stretches.list.size());
+        assertTrue(stretches.list.get(0).startReached);
+
+        FolderFeedCacheCore.Stretches<Msg> lower = new FolderFeedCacheCore.Stretches<>(IDS);
+        lower.remember(page(10, 30), 0, 1, true);
+        lower.remember(page(5, 9), 10, 2, false); // something older exists after all: not the start
+        assertEquals(1, lower.list.size());
+        assertFalse(lower.list.get(0).startReached);
+
+        FolderFeedCacheCore.Stretches<Msg> later = new FolderFeedCacheCore.Stretches<>(IDS);
+        later.remember(page(10, 30), 0, 1, false);
+        later.remember(page(1, 9), 10, 2, true); // an older page reaching the start
+        assertTrue(later.list.get(0).startReached);
+    }
+
+    @Test
+    public void aPageReachingTheStartKeepsItsFlagWhenItSharesTheStretchBottom() {
+        // A stretch learned without knowing it was at the start, then a page with the same oldest message
+        // that knows it (e.g. an around window that found fewer older posts than asked).
+        FolderFeedCacheCore.Stretches<Msg> stretches = new FolderFeedCacheCore.Stretches<>(IDS);
+        stretches.remember(page(1, 30), 0, 1, false);
+        stretches.remember(page(1, 12), 0, 2, true);
+        assertEquals(1, stretches.list.size());
+        assertTrue(stretches.list.get(0).startReached);
+        assertTrue(stretches.reachesStart(stretches.window(5, 0, 10, 10, 3)));
+    }
+
+    @Test
+    public void anEmptyOlderPageMarksTheStretchItContinues() {
+        FolderFeedCacheCore.Stretches<Msg> stretches = new FolderFeedCacheCore.Stretches<>(IDS);
+        stretches.remember(page(40, 60), 0, 1);
+        stretches.remember(page(5, 20), 0, 2);
+        stretches.remember(new ArrayList<Msg>(), 40, 3, false);
+        assertFalse("not reaching the start: nothing learned", stretches.list.get(0).startReached || stretches.list.get(1).startReached);
+        stretches.remember(new ArrayList<Msg>(), 39, 4, true);
+        assertFalse("continues no stretch's bottom", stretches.list.get(0).startReached || stretches.list.get(1).startReached);
+        stretches.remember(new ArrayList<Msg>(), 40, 5, true);
+        assertEquals(2, stretches.list.size());
+        assertTrue(stretches.reachesStart(stretches.window(45, 0, 10, 10, 6)));
+        assertFalse(stretches.reachesStart(stretches.window(10, 0, 10, 10, 7)));
+    }
+
+    @Test
+    public void trimmingTheBottomForgetsTheStart() {
+        FolderFeedCacheCore.Stretches<Msg> stretches = new FolderFeedCacheCore.Stretches<>(IDS);
+        stretches.remember(page(1, 100), 0, 1, true);
+        stretches.remember(page(81, 140), 0, 2); // merged 1..140; the bottom is trimmed
+        assertEquals(21, stretches.list.get(0).minId());
+        assertFalse(stretches.list.get(0).startReached);
+
+        FolderFeedCacheCore.Stretches<Msg> top = new FolderFeedCacheCore.Stretches<>(IDS);
+        top.remember(page(30, 140), 0, 1);
+        top.remember(page(1, 40), 30, 2, true); // merged 1..140; the top is trimmed
+        assertEquals(1, top.list.get(0).minId());
+        assertTrue("the start survives trimming the top", top.list.get(0).startReached);
     }
 
     // endregion

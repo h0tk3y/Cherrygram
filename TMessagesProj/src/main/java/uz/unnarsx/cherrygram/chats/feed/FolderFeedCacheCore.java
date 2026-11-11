@@ -168,8 +168,11 @@ final class FolderFeedCacheCore {
                 boolean continues = connectsTo != 0 && stretch.minId() <= connectsTo && connectsTo <= stretch.maxId();
                 if (continues || stretch.overlaps(merged)) {
                     // Overlapping stretches are each contiguous, so together they are too. The result starts
-                    // at the channel's first message if the part holding its oldest message did.
-                    boolean startReached = stretch.minId() <= merged.minId() ? stretch.startReached : merged.startReached;
+                    // at the channel's first message if a part holding its oldest message did (either, when
+                    // both start at the same message).
+                    boolean startReached = stretch.minId() < merged.minId() ? stretch.startReached
+                            : merged.minId() < stretch.minId() ? merged.startReached
+                            : stretch.startReached || merged.startReached;
                     stretch.byId.putAll(merged.byId);
                     stretch.startReached = startReached;
                     merged = stretch;

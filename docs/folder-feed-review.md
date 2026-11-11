@@ -125,8 +125,10 @@ Tests are in `TMessagesProj/src/test/java/uz/unnarsx/cherrygram/chats/feed/`:
   - dates never increase down the feed, each channel's ids decrease, and synthetic ids are unique and grow upwards;
   - pages never exceed the cap, and a short page appears only at the end of history.
   It covers opening at the newest posts, at a saved post (also a deleted one), and at the first unread post, where the opening post must be the oldest unread post. It also covers live posts that arrive while requests are in flight, and page capping.
-- **`FolderFeedMergeTest`** has focused cases for each building block, plus regression tests for the two bugs below.
-- **`FolderFeedCacheCoreTest`** covers hole trimming (holes on either side, the pivot inside a hole, boundaries) and the stretches (merging by overlap or `connectsTo`, copies, window selection, LRU and far-end trimming).
+
+  It also covers reopening from the in-memory stretches: `FeedDriver` records pages the way `FolderFeedCache.write` does. Several feeds are opened one after another in one app session, and the last one must still show every post in order. A channel created after the saved position reopens from memory with no opening or older request.
+- **`FolderFeedMergeTest`** has focused cases for each building block, including the start-of-history cache verdicts, plus regression tests for the two bugs below.
+- **`FolderFeedCacheCoreTest`** covers hole trimming (holes on either side, the pivot inside a hole, boundaries) and the stretches: merging by overlap or `connectsTo`, copies, window selection, LRU and far-end trimming. It also covers the "start reached" flag: merging, trimming, an empty older page marking the stretch it continues, and `reachesStart`.
 
 To run them:
 
@@ -143,7 +145,10 @@ In CI (`.github/workflows/folder-feed-test-build.yml`):
 - The build job also runs the tests through Gradle and fails if none ran or any failed.
 - Both jobs write their test counts to the job summary.
 
-A mutation check (20 typical mistakes injected into the core, such as off-by-one watermarks, the wrong `capPage` end, no deduplication or ignored live posts) was caught 20/20.
+There are 63 tests, which run in about 3 seconds. A mutation check injected 27 typical mistakes into the core and the tests caught all 27, for example:
+- off-by-one watermarks or the wrong `capPage` end;
+- no deduplication, or ignored live posts;
+- dropped or misplaced start-of-history flags.
 
 ### Bugs the tests found (fixed in `e839c083`)
 
@@ -151,6 +156,8 @@ A mutation check (20 typical mistakes injected into the core, such as off-by-one
 |---|---|---|---|
 | T1 | medium | The feed opened at the date of a channel's first unread *message*, which may be a service message such as "post pinned". A busy channel could then fill the first page with read posts, and the feed opened without any unread post in it (no divider, no position). | **fixed**: the opening point is the first unread *post*. |
 | T2 | low-medium | A channel set up at its top around the opening point (its last post was older) that got more than 20 posts while the feed was open showed the later ones at the bottom of the feed. The split at the opening point applied only to its first older page. This is the realistic trigger of review note V5. | **fixed**: every older page is split. For channels opened around the point this changes nothing, because their older edge holds only earlier posts. |
+
+One more, in `62a0a9dd` ("accept cached windows of channels whose history starts later"), found by its new tests: when a page that reaches the start of history and an existing stretch begin at the same message, the merge kept only the existing stretch's flag, so the knowledge was lost. **Fixed**: either flag counts.
 
 Still accepted from V5: if the dialogs list itself was stale when the feed opened (no live update), posts found later above the stale top are added at the newer end.
 
