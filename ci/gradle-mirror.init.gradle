@@ -1,0 +1,49 @@
+// CI-only Gradle init script: resolve from Google's official mirror of Maven Central first.
+//
+// repo.maven.apache.org and the Gradle Plugin Portal redirected some large artifacts (e.g.
+// kotlin-compiler-embeddable) to GitHub release downloads, which returned HTTP 502/504 from GitHub
+// Actions runners. The mirror serves the same artifacts directly. The original repositories stay
+// as fallbacks after it. Applies to the main build and to buildSrc.
+
+def mirrorName = 'MavenCentralGoogleMirror'
+def mirrorUrl = 'https://maven-central.storage-download.googleapis.com/maven2/'
+
+def addMirrorFirst = { RepositoryHandler repos ->
+    if (repos.findByName(mirrorName) == null) {
+        def repo = repos.maven {
+            name = mirrorName
+            url = mirrorUrl
+        }
+        repos.remove(repo)
+        repos.addFirst(repo)
+    }
+}
+
+beforeSettings { settings ->
+    def pluginRepos = settings.pluginManagement.repositories
+    // An empty list means "Gradle Plugin Portal"; adding the mirror would drop that implicit default.
+    boolean hadNone = pluginRepos.isEmpty()
+    addMirrorFirst(pluginRepos)
+    if (hadNone) {
+        pluginRepos.gradlePluginPortal()
+    }
+    addMirrorFirst(settings.buildscript.repositories)
+}
+
+settingsEvaluated { settings ->
+    addMirrorFirst(settings.pluginManagement.repositories)
+    addMirrorFirst(settings.dependencyResolutionManagement.repositories)
+}
+
+allprojects {
+    addMirrorFirst(buildscript.repositories)
+    addMirrorFirst(repositories)
+    afterEvaluate {
+        // Build scripts may add repositories after this ran; keep the mirror in front.
+        def repo = repositories.findByName(mirrorName)
+        if (repo != null && repositories.indexOf(repo) != 0) {
+            repositories.remove(repo)
+            repositories.addFirst(repo)
+        }
+    }
+}

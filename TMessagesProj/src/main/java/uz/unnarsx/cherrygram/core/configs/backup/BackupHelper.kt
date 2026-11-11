@@ -57,7 +57,7 @@ object BackupHelper {
         "CP_ShowSeconds", "CP_DisablePremiumStatuses",
         "CP_ReplyBackground", "CP_ReplyCustomColors", "CP_ReplyBackgroundEmoji", "CP_ProfileHidePhoneNumber", "CP_ProfileChannelPreview",
         "AP_ShowID_DC_new", "CP_ProfileBirthDatePreview", "CP_ProfileBusinessPreview", "CP_ProfileBackgroundColor",
-        "CP_ProfileBackgroundEmoji", "AP_FoldersAtBottom", "AP_FolderNameInHeader", "CP_NewTabs_RemoveAllChats", "CP_NewTabs_NoCounter",
+        "CP_ProfileBackgroundEmoji", "AP_FoldersAtBottom", "AP_FolderChannelsFeed", "AP_FolderChannelsFeedEntry", "AP_FolderNameInHeader", "CP_NewTabs_RemoveAllChats", "CP_NewTabs_NoCounter",
         "CP_TabsIncludeMutedInCounter", "AP_TabMode", "AP_TabStyleAddStroke", "AP_DrawSnowInActionBar", "AP_DrawSnowInChat",
 
         // Bottom tabs
@@ -72,7 +72,7 @@ object BackupHelper {
         "CP_DisableSwipeToNext", "CP_iOSMessageInputField", "CP_HideSendAsChannel", "CP_HideMuteUnmuteButton", "CP_HideKeyboardOnScrollIntensity",
         "CP_GeminiApiKey", "CP_GeminiModelName", "CP_GeminiSystemPrompt", "CP_GeminiTemperature", "CP_VoiceTranscriptionProvider",
         "translationKeyboardTarget", "translationTarget", "translationTargetGemini",
-        "CP_ShareDrawStoryButton", "CP_UsersDrawShareButton",
+        "CP_ShareDrawStoryButton", "CP_UsersDrawShareButton", "CG_QuickFolderActions",
         "CP_SupergroupsDrawShareButton", "CP_ChannelsDrawShareButton", "CP_BotsDrawShareButton",
         "CP_StickersDrawShareButton", "CP_ShowSaveForNotifications", "CP_ShowGemini", "CP_ShowReply",
         "CP_ShowSaveToGallery", "CP_ShowCopyPhoto", "CP_ShowCopyPhotoAsSticker", "CP_ShowSaveToDownloads", "CP_ShowShare",

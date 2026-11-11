@@ -1,0 +1,313 @@
+# Runs the folder feed's JVM unit tests, builds an installable test APK of the merged folder channels
+# feed branch and smoke-tests it on an emulator. Not the official release pipeline: closed-source parts
+# are replaced by stubs (see ci/), and the APK is signed with a throwaway key (ci/ci-test-signing.jks).
+#
+# Optional repository secrets:
+#   TG_APP_ID, TG_APP_HASH  your API id/hash from https://my.telegram.org, used by the APK. Without them
+#                           it falls back to upstream Telegram's public defaults (DEFAULT_TG_APP_*).
+#                           Note: they are compiled into the APK, which is published as a public
+#                           pre-release, so anyone who downloads it can read them.
+name: Folder feed test build
+
+on:
+  push:
+    branches:
+      - claude/telegram-merged-folder-channels-clolue
+    paths-ignore:
+      - '**.md'
+  workflow_dispatch:
+
+# One pipeline at a time, whatever the ref: every run publishes the same release.
+concurrency:
+  group: folder-feed
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  APP_PACKAGE: uz.unnarsx.cherrygram.beta
+  APK_NAME: Cherrygram-folder-feed-test.apk
+  # Telegram's public Android API credentials, as shipped in upstream Telegram's open source
+  # (TMessagesProj/src/main/java/org/telegram/messenger/BuildVars.java). Used when the TG_APP_ID /
+  # TG_APP_HASH secrets are not set; personal test builds only.
+  DEFAULT_TG_APP_ID: '4'
+  DEFAULT_TG_APP_HASH: 014b35b6184100b085b0d0572f9b5103
+
+jobs:
+  # Fast (about a minute): the feed's merge/paging core and cache logic on a plain JVM
+  # (TMessagesProj/src/test, ci/unit-tests/run.sh). The APK is only built and published if they pass.
+  unit-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Folder feed unit tests
+        run: |
+          set -o pipefail
+          ci/unit-tests/run.sh "$RUNNER_TEMP/feed-unit-tests" | tee "$RUNNER_TEMP/unit-tests.log"
+          {
+            echo "### Folder feed unit tests"
+            echo '```'
+            grep -E "^(Running|OK|Tests run|FAILURES)" "$RUNNER_TEMP/unit-tests.log"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  build:
+    needs: unit-tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    permissions:
+      contents: write # publishes the pre-release
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift /usr/local/share/boost \
+            /opt/hostedtoolcache/CodeQL /usr/local/lib/node_modules /usr/local/share/powershell /usr/share/miniconda || true
+          df -h /
+
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+          persist-credentials: false
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Android SDK packages
+        timeout-minutes: 20
+        run: |
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKMANAGER" --licenses > /dev/null
+          # Retried with a time limit per attempt: a stalled download must not hold the job for hours.
+          for attempt in 1 2 3; do
+            if timeout 600 "$SDKMANAGER" "platforms;android-36" "build-tools;36.0.0" "ndk;27.2.12479018" "cmake;3.22.1" > /dev/null; then break; fi
+            if [ "$attempt" = 3 ]; then echo "::error::Android SDK packages could not be installed"; exit 1; fi
+            sleep $((attempt * 20))
+          done
+
+      # ccache only speeds up the native build: if no Ubuntu mirror answers in time, build without it.
+      - name: ccache (optional)
+        timeout-minutes: 6
+        continue-on-error: true
+        run: |
+          for attempt in 1 2 3; do
+            if timeout 90 sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=20 update -qq \
+                && timeout 90 sudo apt-get -o Acquire::http::Timeout=20 install -y -qq ccache; then break; fi
+            sleep $((attempt * 10))
+          done
+          command -v ccache || echo "::warning::ccache not installed; the native build runs without it"
+
+      - name: Restore ccache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/ccache
+          key: ccache-${{ hashFiles('TMessagesProj/jni/CMakeLists.txt', 'ci/native-stubs/**', 'ci/prepare-build.py') }}-${{ github.sha }}
+          restore-keys: |
+            ccache-${{ hashFiles('TMessagesProj/jni/CMakeLists.txt', 'ci/native-stubs/**', 'ci/prepare-build.py') }}-
+            ccache-
+
+      # The repository's gradle-wrapper.jar does not match any official Gradle release checksum, so
+      # it is not executed: install the official Gradle version it pins and run `gradle` instead.
+      # Downloaded with retries and mirror fallbacks (Gradle's download host returned HTTP 504),
+      # accepted only if it matches the official checksum from https://gradle.org/release-checksums/.
+      # No Gradle User Home cache: a cache saved by a failed run kept a stale GitHub release URL for a
+      # Maven Central artifact. Dependencies come fresh from Maven Central/Google each run; the slow
+      # native build has its own ccache.
+      - name: Install Gradle 8.13
+        run: |
+          SHA=20f1b1176237254a6fc204d8434196fa11a4cfb387567519c61556e8710aed78
+          ZIP="$RUNNER_TEMP/gradle-8.13-bin.zip"
+          OK=0
+          for url in \
+            https://services.gradle.org/distributions/gradle-8.13-bin.zip \
+            https://downloads.gradle.org/distributions/gradle-8.13-bin.zip \
+            https://mirrors.cloud.tencent.com/gradle/gradle-8.13-bin.zip \
+            https://mirrors.aliyun.com/gradle/distributions/v8.13.0/gradle-8.13-bin.zip; do
+            for attempt in 1 2 3; do
+              echo "Downloading $url (attempt $attempt)"
+              if curl -fsSL --max-time 300 -o "$ZIP" "$url" && echo "$SHA  $ZIP" | sha256sum -c -; then
+                OK=1
+                break 2
+              fi
+              sleep $((attempt * 10))
+            done
+          done
+          if [ "$OK" != 1 ]; then echo "::error::Could not download a verified Gradle 8.13"; exit 1; fi
+          unzip -q "$ZIP" -d "$RUNNER_TEMP/gradle"
+          echo "$RUNNER_TEMP/gradle/gradle-8.13/bin" >> "$GITHUB_PATH"
+
+      - name: Prepare sources (stubs, signing, ABIs)
+        env:
+          TG_APP_ID: ${{ secrets.TG_APP_ID || env.DEFAULT_TG_APP_ID }}
+          TG_APP_HASH: ${{ secrets.TG_APP_HASH || env.DEFAULT_TG_APP_HASH }}
+        run: python3 ci/prepare-build.py
+
+      - name: Build test APK
+        id: build
+        env:
+          CCACHE_DIR: /home/runner/.cache/ccache
+          CCACHE_BASEDIR: ${{ github.workspace }}
+          CCACHE_MAXSIZE: 6G
+          CCACHE_COMPILERCHECK: content
+        run: |
+          ccache -z || true
+          gradle --version
+          # Google's mirror of Maven Central first: Maven Central redirected Kotlin compiler jars to
+          # GitHub release downloads, which fail from runners (HTTP 502/504).
+          gradle --init-script ci/gradle-mirror.init.gradle :TMessagesProj_App:assembleAfatDebug -PAPP_PACKAGE=$APP_PACKAGE --stacktrace --no-daemon
+          ccache -s || true
+
+      # The same unit tests as the unit-tests job, through the module's Gradle setup (src/test of
+      # TMessagesProj), so they keep working for anyone running them from the IDE or Gradle.
+      - name: Unit tests under Gradle
+        run: |
+          set -o pipefail
+          gradle --init-script ci/gradle-mirror.init.gradle :TMessagesProj:testDebugUnitTest --tests 'uz.unnarsx.cherrygram.chats.feed.*' -PAPP_PACKAGE=$APP_PACKAGE --no-daemon
+          python3 - <<'EOF' | tee -a "$GITHUB_STEP_SUMMARY"
+          import glob, xml.etree.ElementTree as ET
+          files = glob.glob("TMessagesProj/build/test-results/testDebugUnitTest/*.xml")
+          totals = [0, 0, 0, 0]
+          for f in files:
+              r = ET.parse(f).getroot()
+              for i, k in enumerate(("tests", "failures", "errors", "skipped")):
+                  totals[i] += int(r.get(k, 0))
+          print("Gradle unit tests: %d classes, %d tests, %d failures, %d errors, %d skipped" % (len(files), *totals))
+          if not files or totals[0] == 0 or totals[1] or totals[2]:
+              raise SystemExit("no tests ran, or tests failed")
+          EOF
+
+      # Saved even when a later (Java/Kotlin) part of the build fails, so the slow native build is
+      # reused, but not when the build never started.
+      - name: Save ccache
+        if: always() && steps.build.outcome != 'skipped'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/ccache
+          key: ccache-${{ hashFiles('TMessagesProj/jni/CMakeLists.txt', 'ci/native-stubs/**', 'ci/prepare-build.py') }}-${{ github.sha }}
+
+      - name: Collect and verify APK
+        run: |
+          set -o pipefail
+          mkdir -p apk-out
+          SRC=$(find TMessagesProj_App/build/outputs/apk -name '*.apk' | head -n 1)
+          cp "$SRC" "apk-out/$APK_NAME"
+          ls -la apk-out
+          BT="$ANDROID_HOME/build-tools/36.0.0"
+          "$BT/apksigner" verify "apk-out/$APK_NAME"
+          echo "::group::APK details"
+          sha256sum "apk-out/$APK_NAME"
+          "$BT/apksigner" verify --verbose --print-certs "apk-out/$APK_NAME" | head -n 20
+          "$BT/aapt2" dump badging "apk-out/$APK_NAME" | grep -E "^(package|minSdkVersion|sdkVersion|targetSdkVersion|native-code|uses-split)" || true
+          echo "::endgroup::"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cherrygram-folder-feed-apk
+          path: apk-out/*.apk
+          retention-days: 14
+
+      # The release is kept and its APK replaced, so the download link
+      # releases/download/folder-feed-test/Cherrygram-folder-feed-test.apk stays the same and never
+      # disappears, even if a run fails or is cancelled halfway.
+      - name: Publish rolling pre-release (direct download link for phones)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -o pipefail
+          TAG=folder-feed-test
+          TITLE="Folder feed test build (${GITHUB_SHA::7})"
+          NOTES="Test build of the merged folder channels feed from branch ${GITHUB_REF_NAME} (commit ${GITHUB_SHA}). Package ${APP_PACKAGE} (installs next to regular Cherrygram), signed with a throwaway CI key, closed-source Cherrygram extras stubbed out. Not an official build."
+          if ! gh release view "$TAG" -R "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release create "$TAG" -R "$GITHUB_REPOSITORY" --prerelease --target "$GITHUB_SHA" --title "$TITLE" --notes "$NOTES"
+          fi
+          gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/$TAG" -f sha="$GITHUB_SHA" -F force=true > /dev/null
+          gh release upload "$TAG" "apk-out/$APK_NAME" -R "$GITHUB_REPOSITORY" --clobber
+          # Older builds were uploaded under per-commit names.
+          gh release view "$TAG" -R "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' | while read -r name; do
+            if [ "$name" != "$APK_NAME" ]; then gh release delete-asset "$TAG" "$name" -R "$GITHUB_REPOSITORY" --yes; fi
+          done
+          gh release edit "$TAG" -R "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "$TITLE" --notes "$NOTES"
+
+  emulator-test:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: cherrygram-folder-feed-apk
+          path: apk
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Smoke test on emulator
+        # v2.38.0, pinned: a third-party action running next to the APK.
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d
+        with:
+          api-level: 34
+          target: google_apis
+          arch: x86_64
+          profile: pixel_6
+          ram-size: 4096M
+          disk-size: 4096M
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -no-snapshot
+          script: python3 ci/emulator/ui_test.py --apk "apk/$APK_NAME" --out ci-out --package "$APP_PACKAGE"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: emulator-screenshots
+          path: ci-out
+          retention-days: 14
+
+  # Separate job, so the emulator job (third-party action, the APK) only has a read-only token.
+  publish-screenshots:
+    needs: emulator-test
+    if: always() && needs.emulator-test.result != 'skipped'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: emulator-screenshots
+          path: ci-out
+
+      - name: Publish screenshots to the ci-screenshots branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          [ -d ci-out ] || exit 0
+          cd ci-out
+          git init -q
+          git checkout -q -b ci-screenshots
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          echo "Screenshots for ${GITHUB_SHA}" > COMMIT.txt
+          git add -A
+          git commit -q -m "Emulator screenshots for ${GITHUB_SHA}"
+          git push -q --force "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" ci-screenshots

@@ -75,6 +75,24 @@ object CherrygramChatsConfig: CoroutineScope by CoroutineScope(
     var openLinksInIV by sharedPreferences.boolean("CP_OpenLinksInIV", false)
     /** Actions finish */
 
+    /** Channels start */
+    // Merged feed of all channels of a folder. Keys keep their original "AP_" names so existing
+    // settings and backups carry over.
+    var folderChannelsFeed by sharedPreferences.boolean("AP_FolderChannelsFeed", false)
+    const val FOLDER_FEED_ENTRY_PINNED = 0
+    const val FOLDER_FEED_ENTRY_ACTION_BAR = 1
+    const val FOLDER_FEED_ENTRY_BOTH = 2
+    var folderChannelsFeedEntry by sharedPreferences.int("AP_FolderChannelsFeedEntry", FOLDER_FEED_ENTRY_BOTH)
+    fun showFolderFeedPinnedEntry(): Boolean = folderChannelsFeedEntry != FOLDER_FEED_ENTRY_ACTION_BAR
+    fun showFolderFeedActionBarButton(): Boolean = folderChannelsFeedEntry != FOLDER_FEED_ENTRY_PINNED
+    /** Channels finish */
+
+    /** Folders start */
+    // Shows a chat's folders on its info screen (add or remove there), and lets chats selected in the
+    // chat list be added to folders from any folder tab.
+    var quickFolderActions by sharedPreferences.boolean("CG_QuickFolderActions", false)
+    /** Folders finish */
+
     /** Media start */
     var recordMultiMic by sharedPreferences.boolean("CP_RecordMultiMic", true)
     var recordInStereo by sharedPreferences.boolean("CP_RecordInStereo", false)

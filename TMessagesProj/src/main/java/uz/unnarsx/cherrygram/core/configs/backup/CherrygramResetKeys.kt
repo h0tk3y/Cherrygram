@@ -37,7 +37,7 @@ object CherrygramResetKeys {
         "AP_CenterTitle", "AP_HideSearchField", "AP_DrawSnowInActionBar",
         "AP_IconBasedSplash", "AP_Icon_Replacements1", "AP_OneUI_SwitchStyle", "AP_DisableDividers", "AP_GlareEffect",
         "CP_NewTabs_RemoveAllChats", "CP_NewTabs_NoCounter", "CP_TabsIncludeMutedInCounter",
-        "AP_TabMode", "AP_TabStyleAddStroke", "AP_FolderNameInHeader", "AP_FoldersAtBottom",
+        "AP_TabMode", "AP_TabStyleAddStroke", "AP_FolderNameInHeader", "AP_FoldersAtBottom", "AP_FolderChannelsFeed", "AP_FolderChannelsFeedEntry",
         "AP_ShowMainTabs", "AP_OpenSettingsBySwipe", "AP_MainTabsPosition_New", "AP_ShowSearchInTabs_New",
         "AP_ShowMainTabsTitle", "AP_MainTabsForceOpenChats",
         "CP_ShowSeconds", "CP_DisablePremiumStatuses", "CP_ReplyBackground", "CP_ReplyCustomColors", "CP_ReplyBackgroundEmoji",
@@ -56,7 +56,7 @@ object CherrygramResetKeys {
         "CP_AutoQuoteReplies", "CP_DisableSwipeToNext", "CP_DisableVibration", "CP_OpenLinksInIV",
         "CP_RecordMultiMic", "CP_RecordInStereo", "CP_MuteSystemSounds", "CP_VoiceMessagesAutoPlay",
         "CP_PlayVideo", "CP_AutoPauseVideo", "CP_VideoSeekDuration",
-        "CP_Notification_Sound", "CP_VibrationInChats",
+        "CP_Notification_Sound", "CP_VibrationInChats", "CG_QuickFolderActions",
         "CG_ForwardAuthorship", "CG_ForwardCaptions", "CG_ForwardNotify", "CG_NoAuthorship", "CG_NoCaptions",
         "CG_UnarchiveOnSwipe", "CG_SortByUnread",
 
