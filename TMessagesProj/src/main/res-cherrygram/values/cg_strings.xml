@@ -304,7 +304,6 @@
     <string name="CG_FolderFeed_Channels">Channels in this feed</string>
     <string name="CG_FolderFeed_NextUnread">Next unread post</string>
     <string name="CG_FolderFeed_Loading">Loading %1$d of %2$d channels…</string>
-    <string name="CG_FolderFeed_OpenStats">Opened in %1$.1f s. Channels from the local cache: %2$d of %3$d (from this session\'s memory: %4$d; nothing cached: %5$d; cached, but without posts right before this point: %6$d, right after it: %7$d). Network requests: %8$d (%9$.1f s each on average, up to %10$d at once). Flood waits: %11$d (longest %12$d s).</string>
     <string name="CG_FolderFeed_LoadingChats">Loading chats…</string>
     <string name="CG_FolderFeed_ChannelsCount_one">%1$d channel</string>
     <string name="CG_FolderFeed_ChannelsCount_other">%1$d channels</string>

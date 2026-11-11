@@ -175,3 +175,13 @@ A logged-in emulator test is still not possible. Telegram's test servers answer 
 The server reports `auth.sentCodeTypeSms` with length 5 every time. So the cause is on the server side, not in the client or the script: test numbers no longer accept the fixed code, at least from these IP ranges.
 
 The old script also had client bugs, although they are not the cause: current Telethon disables `sign_up` (1.45.0 checked: it raises `ValueError`, so new numbers could never have been registered through it), and the telethon version was unpinned. The app's own path (country code 999 in a debug build switches `tgnet` to the test DCs) would get the same answer. Run the probe again (push a change to the probe script, or use `workflow_dispatch` once the workflow is on the default branch) to check whether the servers accept the code again.
+
+### Test-build-only diagnostics
+
+The "open stats" line in the "Channels in this feed" dialog is not part of the feature's source. It lives in `ci/patches/folder-feed-open-stats.patch`, which `ci/prepare-build.py` applies only for the CI test APK. The line shows:
+- how long the feed took to open;
+- which channels were read from the cache or this session's memory, and why the others were not;
+- how many network requests were made, with their average time and how many ran at once;
+- flood waits.
+
+Regular builds, and anything merged from this branch, do not include it. If the files the patch touches change, regenerate it: apply it, make the change, and save `git diff` again. The test build fails loudly when the patch no longer applies.

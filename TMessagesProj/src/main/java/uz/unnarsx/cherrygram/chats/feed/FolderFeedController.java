@@ -19,12 +19,10 @@ import org.telegram.messenger.AccountInstance;
 import org.telegram.messenger.AndroidUtilities;
 import org.telegram.messenger.ChatObject;
 import org.telegram.messenger.FileLog;
-import org.telegram.messenger.LocaleController;
 import org.telegram.messenger.MessageObject;
 import org.telegram.messenger.MessagesController;
 import org.telegram.messenger.MessagesStorage;
 import org.telegram.messenger.NotificationCenter;
-import org.telegram.messenger.R;
 import org.telegram.messenger.UserConfig;
 import org.telegram.tgnet.ConnectionsManager;
 import org.telegram.tgnet.TLRPC;
@@ -275,14 +273,6 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
         final TLRPC.InputPeer peer;
         /** The opening request (window around the read pointer or around the opening point). */
         final Slot opening = new Slot();
-        /** Opening, for the open stats: the local cache was asked for this channel, had posts of it,
-         *  and gave a usable window. */
-        boolean cacheAsked;
-        boolean cacheHadPosts;
-        boolean fromCache;
-        boolean fromMemory;
-        /** Why the last cached window was not used (CACHE_MISS_*), for the open stats. */
-        int cacheMiss;
 
         Source(long dialogId, TLRPC.InputPeer peer) {
             super(dialogId);
@@ -341,16 +331,7 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
         int aroundCacheState = CACHE_NOT_READ;
         /** Opening at the newest posts: the channels' newest cached posts are read first. */
         int latestCacheState = CACHE_DONE;
-        /** How the opening went, for {@link #getOpenStats(int)}. */
-        final long startTime = SystemClock.elapsedRealtime();
-        int requestsSent;
-        int responses;
-        long responseTimeTotal;
-        int maxInFlight;
         boolean resumeScheduled;
-        int floodWaits;
-        int floodWaitSeconds;
-        String openStats;
 
         Session(int guid) {
             this.guid = guid;
@@ -521,42 +502,6 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
         }
         sessions.remove(guid);
         updateObservingNewMessages();
-    }
-
-    private void recordOpenStats(Session session) {
-        float seconds = (SystemClock.elapsedRealtime() - session.startTime) / 1000f;
-        int fromCache = 0, fromMemory = 0, nothingCached = 0, noEarlier = 0, noLater = 0;
-        for (Source source : session.sources) {
-            if (source.fromCache) {
-                fromCache++;
-                if (source.fromMemory) {
-                    fromMemory++;
-                }
-            } else if (source.cacheAsked) {
-                if (!source.cacheHadPosts) {
-                    nothingCached++;
-                } else if (source.cacheMiss == CACHE_MISS_NO_EARLIER) {
-                    noEarlier++;
-                } else {
-                    noLater++;
-                }
-            }
-        }
-        float averageRequest = session.responses > 0 ? session.responseTimeTotal / 1000f / session.responses : 0;
-        session.openStats = LocaleController.formatString(R.string.CG_FolderFeed_OpenStats, seconds, fromCache,
-                session.sources.size(), fromMemory, nothingCached, noEarlier, noLater, session.requestsSent, averageRequest,
-                session.maxInFlight, session.floodWaits, session.floodWaitSeconds);
-        FileLog.d("FolderFeed: " + session.openStats);
-    }
-
-    /**
-     * How the feed shown by the ChatActivity with the given classGuid opened (time, channels read from
-     * the local cache, network requests, flood waits), or null while it is still opening.
-     */
-    @Nullable
-    public String getOpenStats(int guid) {
-        Session session = sessions.get(guid);
-        return session != null ? session.openStats : null;
     }
 
     /** Whether the channel is part of the feed shown by the ChatActivity with the given classGuid. */
@@ -743,7 +688,6 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
             // the first one), or at the channel's first message, and contains it.
             int verdict = FolderFeedMerge.probeCacheVerdict(scan, source.readMax, startReached);
             if (verdict != FolderFeedMerge.CACHE_USABLE) {
-                source.cacheMiss = verdict;
                 return false;
             }
             // Neither end is taken from the database: it cannot tell where history begins (one request
@@ -774,7 +718,6 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
             // or nothing older exists (the channel's history begins after the opening point).
             int verdict = FolderFeedMerge.aroundCacheVerdict(scan, atTop, startReached);
             if (verdict != FolderFeedMerge.CACHE_USABLE) {
-                source.cacheMiss = verdict;
                 return false;
             }
             // As for the probe window, a network page confirms the newest end.
@@ -791,8 +734,6 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
          */
         boolean onWindow(Source source, ArrayList<TLRPC.Message> window, int liveVersionAtRead, boolean startReached);
     }
-
-    private static final int CACHE_MISS_NO_EARLIER = FolderFeedMerge.CACHE_MISS_NO_EARLIER;
 
     private static final int CACHE_KIND_PROBE = 0;
     private static final int CACHE_KIND_AROUND = 1;
@@ -842,18 +783,14 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
                 if (memoryWindow == null && databaseWindow == null) {
                     continue;
                 }
-                source.cacheAsked = true;
                 for (ArrayList<TLRPC.Message> window : new ArrayList[]{memoryWindow, databaseWindow}) {
                     if (window == null || window.isEmpty()) {
                         continue;
                     }
-                    source.cacheHadPosts = true;
                     boolean startReached = window == memoryWindow
                             ? windows.memoryReachesStart.contains(source.dialogId)
                             : FolderFeedCache.holdsFirstMessage(window);
                     if (handler.onWindow(source, window, versions[i], startReached)) {
-                        source.fromCache = true;
-                        source.fromMemory = window == memoryWindow;
                         break;
                     }
                 }
@@ -985,9 +922,6 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
                         0L, size, messageObjects, false, firstUnreadId, newerEnd ? 0 : Integer.MIN_VALUE, 0, 0, 2, olderEnd,
                         session.guid, loadIndex, 0, 0, ChatActivity.MODE_FOLDER_FEED);
             }
-            if (direction == LOADED_INITIAL) {
-                recordOpenStats(session);
-            }
             // A restored position is applied by ChatActivity before the first layout (args[4]).
             notificationCenter.postNotificationName(NotificationCenter.cgFolderFeedLoaded, session.guid, olderEnd, direction, newerEnd, restoreId);
         });
@@ -1047,13 +981,8 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
      */
     private void sendHistory(Session session, Slot slot, TLRPC.TL_messages_getHistory req, HistoryHandler onResponse, Runnable onGiveUp) {
         slot.inFlight = true;
-        session.requestsSent++;
-        session.maxInFlight = Math.max(session.maxInFlight, inFlightCount(session));
-        final long sentAt = SystemClock.elapsedRealtime();
         slot.reqId = ConnectionsManager.getInstance(currentAccount).sendRequest(req, (response, error) -> AndroidUtilities.runOnUIThread(() -> {
             slot.inFlight = false;
-            session.responses++;
-            session.responseTimeTotal += SystemClock.elapsedRealtime() - sentAt;
             if (sessions.get(session.guid) != session) {
                 return;
             }
@@ -1129,8 +1058,6 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
             try {
                 int seconds = Integer.parseInt(error.text.substring("FLOOD_WAIT_".length()));
                 delay = Math.max(delay, seconds * 1000 + 500);
-                session.floodWaits++;
-                session.floodWaitSeconds = Math.max(session.floodWaitSeconds, seconds);
             } catch (NumberFormatException ignore) {
             }
             long now = SystemClock.elapsedRealtime();

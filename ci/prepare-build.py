@@ -10,10 +10,12 @@ native modules) are closed-source and gitignored, and the signing key is private
   3. installs the throwaway CI signing key (ci/ci-test-signing.jks) where the build expects it,
   4. limits native builds to arm64-v8a (phones) and x86_64 (emulator), builds native code optimized
      even for the debug APK, and enables ccache,
-  5. makes buildSrc resolve plugins from Maven Central before the Gradle Plugin Portal.
+  5. makes buildSrc resolve plugins from Maven Central before the Gradle Plugin Portal,
+  6. applies the test-build-only patches in ci/patches (diagnostics kept out of the source).
 
 It only edits the working tree of the CI runner; nothing here is meant to be committed.
 """
+import glob
 import os
 import shutil
 import subprocess
@@ -38,6 +40,11 @@ def replace_once(file, old, new):
 
 def main():
     subprocess.check_call(["bash", path("ci", "apply-stubs.sh")], cwd=ROOT)
+
+    # Test-build-only additions (diagnostics) that must not be part of the feature's source.
+    for patch in sorted(glob.glob(path("ci", "patches", "*.patch"))):
+        subprocess.check_call(["git", "apply", patch], cwd=ROOT)
+        print("prepare-build: applied " + os.path.relpath(patch, ROOT))
 
     env_file = path("secrets_for_ci.env")
     if not os.path.exists(env_file):
