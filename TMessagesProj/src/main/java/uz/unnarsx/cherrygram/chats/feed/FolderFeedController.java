@@ -33,9 +33,10 @@ import org.telegram.ui.ChatActivity;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
-import java.util.Iterator;
 import java.util.List;
 
+import uz.unnarsx.cherrygram.chats.feed.FolderFeedMerge.Edge;
+import uz.unnarsx.cherrygram.chats.feed.FolderFeedMerge.Slot;
 import uz.unnarsx.cherrygram.core.configs.CherrygramAppearanceConfig;
 import uz.unnarsx.cherrygram.core.configs.CherrygramChatsConfig;
 
@@ -66,15 +67,7 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
 
     public static final int MIN_CHANNELS = 2;
 
-    /** Posts a page waits for before it is shown (fewer only at the end of history). */
-    private static final int PAGE_SIZE = 20;
-    /** Posts shown at most in one page; the rest stays buffered for the next one. */
-    private static final int MAX_PAGE_SIZE = 60;
-    /** Posts requested per channel when paging (a page usually takes posts from several channels). */
-    private static final int FETCH_LIMIT = 20;
-    /** Opening: posts fetched per channel at or after / before the opening point. */
-    private static final int AROUND_NEWER = 20;
-    private static final int AROUND_OLDER = 10;
+    // Page sizes and request limits: see FolderFeedMerge (PAGE_SIZE, MAX_PAGE_SIZE, FETCH_LIMIT, AROUND_*).
     /**
      * getHistory requests in flight at once. Telegram has no multi-chat history method, but parallel
      * requests share MTProto containers, so a few in flight cost little; after a FLOOD_WAIT the
@@ -244,51 +237,44 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
 
     // region Sessions
 
-    /** A request slot: at most one getHistory request in flight (or waiting to be retried). */
-    private static class Slot {
-        boolean inFlight;
-        int reqId;
-        int retries;
-    }
+    /**
+     * The merge and paging decisions live in {@link FolderFeedMerge} (plain Java, unit-tested on the JVM);
+     * this is how it reads a {@link TLRPC.Message}.
+     */
+    static final FolderFeedMerge.Posts<TLRPC.Message> TL_POSTS = new FolderFeedMerge.Posts<TLRPC.Message>() {
+        @Override
+        public int id(TLRPC.Message message) {
+            return message.id;
+        }
 
-    /** One edge (older or newer) of a channel's loaded range of history. */
-    private static class Edge extends Slot {
-        /** Real id of the outermost fetched message on this edge (service messages included); 0 = none yet. */
-        int offsetId;
-        /** Bound for the date of every post on this edge that is not fetched yet: upper bound for the older
-         *  edge, lower bound for the newer edge. */
-        int frontier;
-        boolean exhausted;
-        /** Fetched posts not shown yet, ordered from the loaded range outwards: the older edge keeps them
-         *  newest first, the newer edge oldest first. */
-        final ArrayList<TLRPC.Message> buffer = new ArrayList<>();
-    }
+        @Override
+        public int date(TLRPC.Message message) {
+            return message.date;
+        }
 
-    private static class Source {
-        final long dialogId;
+        @Override
+        public long dialogId(TLRPC.Message message) {
+            return MessageObject.getDialogId(message);
+        }
+
+        @Override
+        public boolean isEmpty(TLRPC.Message message) {
+            return message instanceof TLRPC.TL_messageEmpty;
+        }
+
+        @Override
+        public boolean isService(TLRPC.Message message) {
+            return message instanceof TLRPC.TL_messageService;
+        }
+    };
+
+    private static final FolderFeedMerge<TLRPC.Message> MERGE = new FolderFeedMerge<>(TL_POSTS);
+
+    /** A channel of the feed: its paging state ({@link FolderFeedMerge.Channel}) plus what the requests need. */
+    private static class Source extends FolderFeedMerge.Channel<TLRPC.Message> {
         final TLRPC.InputPeer peer;
-        final Edge older = new Edge();
-        final Edge newer = new Edge();
         /** The opening request (window around the read pointer or around the opening point). */
         final Slot opening = new Slot();
-        /** Real ids of every post handed to a buffer, so the two edges never yield the same post twice. */
-        final HashSet<Integer> seen = new HashSet<>();
-        /** Read pointer and unread count when the feed was opened (posts with id > readMax are unread). */
-        int readMax;
-        int unreadCount;
-        /** Opening: date of the channel's first unread message, 0 if it was not found. */
-        int firstUnreadDate;
-        /** Opening: the window around the read pointer (with the first unread message), reused as the
-         *  channel's starting window when it covers the opening point. */
-        ArrayList<TLRPC.Message> probeWindow;
-        boolean probeOlderEnd;
-        boolean probeNewerEnd;
-        int probeLiveVersion;
-        boolean probeDone;
-        boolean aroundDone;
-        /** Bumped when the channel gets a new post, so a newer-edge response built before it does not
-         *  mark the edge as exhausted for good. */
-        int liveVersion;
         /** Opening, for the open stats: the local cache was asked for this channel, had posts of it,
          *  and gave a usable window. */
         boolean cacheAsked;
@@ -299,17 +285,15 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
         int cacheMiss;
 
         Source(long dialogId, TLRPC.InputPeer peer) {
-            this.dialogId = dialogId;
+            super(dialogId);
             this.peer = peer;
         }
+    }
 
-        boolean hasUnread() {
-            return unreadCount > 0 && readMax > 0;
-        }
-
-        Edge edge(boolean newer) {
-            return newer ? this.newer : older;
-        }
+    /** The channel's top as the dialogs list knows it now. */
+    private FolderFeedMerge.DialogTop dialogTop(long dialogId) {
+        TLRPC.Dialog dialog = MessagesController.getInstance(currentAccount).dialogs_dict.get(dialogId);
+        return dialog != null ? new FolderFeedMerge.DialogTop(true, dialog.top_message, dialog.last_message_date) : FolderFeedMerge.DialogTop.UNKNOWN;
     }
 
     private static final int STATE_PROBING = 0;
@@ -329,9 +313,6 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
     public static final int LOADED_OLDER = 1;
     public static final int LOADED_NEWER = 2;
 
-    /** Synthetic ids grow outwards from here: older posts count down, newer posts count up. */
-    private static final int ID_BASE = 1_000_000_000;
-
     private static class Session {
         final int guid;
         int filterId;
@@ -346,8 +327,8 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
         /** Saved position to restore (channel and real id of the post), or 0 to open at the first unread. */
         long restoreDialogId;
         int restoreMessageId;
-        int nextOlderId = ID_BASE;
-        int nextNewerId = ID_BASE + 1;
+        /** Synthetic ids of the shown posts (see {@link FolderFeedMerge.SyntheticIds}). */
+        final FolderFeedMerge.SyntheticIds ids = new FolderFeedMerge.SyntheticIds();
         boolean initialPending = true;
         int initialLoadIndex;
         boolean loadingOlder;
@@ -522,24 +503,7 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
      * the older edge starts from the newest post.
      */
     private void initAtDialogTop(Source source) {
-        TLRPC.Dialog dialog = MessagesController.getInstance(currentAccount).dialogs_dict.get(source.dialogId);
-        int lastDate = dialog != null && dialog.last_message_date > 0 ? dialog.last_message_date : Integer.MAX_VALUE;
-        source.older.offsetId = 0;
-        source.older.frontier = lastDate;
-        source.newer.exhausted = true;
-        setNewerStart(source, null);
-    }
-
-    /** Where newer posts continue: after the given message, or after the dialog's top message. */
-    private void setNewerStart(Source source, TLRPC.Message newest) {
-        if (newest != null) {
-            source.newer.offsetId = newest.id;
-            source.newer.frontier = newest.date;
-        } else {
-            TLRPC.Dialog dialog = MessagesController.getInstance(currentAccount).dialogs_dict.get(source.dialogId);
-            source.newer.offsetId = dialog != null ? dialog.top_message : 0;
-            source.newer.frontier = dialog != null ? dialog.last_message_date : 0;
-        }
+        MERGE.initAtDialogTop(source, dialogTop(source.dialogId));
     }
 
     public void stop(int guid) {
@@ -667,13 +631,7 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
     }
 
     private static boolean hasMore(Session session, boolean newer) {
-        for (Source source : session.sources) {
-            Edge edge = source.edge(newer);
-            if (!edge.exhausted || !edge.buffer.isEmpty()) {
-                return true;
-            }
-        }
-        return false;
+        return FolderFeedMerge.hasMore(session.sources, newer);
     }
 
     private static int inFlightCount(Session session) {
@@ -701,12 +659,7 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
             if (!runOpeningRequests(session, false)) {
                 return;
             }
-            int anchor = 0;
-            for (Source source : session.sources) {
-                if (source.firstUnreadDate > 0 && (anchor == 0 || source.firstUnreadDate < anchor)) {
-                    anchor = source.firstUnreadDate;
-                }
-            }
+            int anchor = FolderFeedMerge.anchorFromProbes(session.sources);
             if (anchor == 0) {
                 // No first unread post could be found: open at the newest posts.
                 startAtLatest(session);
@@ -773,40 +726,6 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
 
     // --- opening: find the opening point, then load every channel around it ---
 
-    /** What a contiguous window of a channel's history holds relative to a pivot (a message id, or else a date). */
-    private static class WindowScan {
-        final ArrayList<TLRPC.Message> messages = new ArrayList<>();
-        int minId = Integer.MAX_VALUE;
-        int maxId;
-        /** Messages before / from the pivot on. */
-        int olderCount;
-        int newerCount;
-        /** The first message after the pivot id (only with an id pivot). */
-        TLRPC.Message firstAfterPivot;
-    }
-
-    private static WindowScan scanWindow(List<TLRPC.Message> messages, Source source, int pivotId, int pivotDate) {
-        WindowScan scan = new WindowScan();
-        for (TLRPC.Message message : messages) {
-            if (!isFromSource(message, source)) {
-                continue;
-            }
-            scan.messages.add(message);
-            scan.minId = Math.min(scan.minId, message.id);
-            scan.maxId = Math.max(scan.maxId, message.id);
-            boolean newer = pivotId != 0 ? message.id >= pivotId : message.date >= pivotDate;
-            if (newer) {
-                scan.newerCount++;
-            } else {
-                scan.olderCount++;
-            }
-            if (pivotId != 0 && message.id > pivotId && (scan.firstAfterPivot == null || message.id < scan.firstAfterPivot.id)) {
-                scan.firstAfterPivot = message;
-            }
-        }
-        return scan;
-    }
-
     /**
      * Opening, before any request: finds each unread channel's first unread post in the local database,
      * with the posts around its read pointer. Channels whose cached history covers it need no request.
@@ -815,25 +734,22 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
         ArrayList<FolderFeedCache.Request> requests = new ArrayList<>();
         for (Source source : session.sources) {
             if (!source.probeDone) {
-                requests.add(new FolderFeedCache.Request(source.dialogId, source.readMax, 0, AROUND_OLDER, AROUND_NEWER));
+                requests.add(new FolderFeedCache.Request(source.dialogId, source.readMax, 0, FolderFeedMerge.AROUND_OLDER, FolderFeedMerge.AROUND_NEWER));
             }
         }
         readCache(session, requests, CACHE_KIND_PROBE, (source, window, liveVersion) -> {
-            WindowScan scan = scanWindow(window, source, source.readMax, 0);
+            FolderFeedMerge.WindowScan<TLRPC.Message> scan = MERGE.scanWindow(window, source, source.readMax, 0);
             // Usable when it starts at or before the read pointer (so its first unread message really is
             // the first one) and contains it.
-            if (scan.minId > source.readMax) {
-                source.cacheMiss = CACHE_MISS_NO_EARLIER;
-                return false;
-            }
-            if (scan.firstAfterPivot == null) {
-                source.cacheMiss = CACHE_MISS_NO_LATER;
+            int verdict = FolderFeedMerge.probeCacheVerdict(scan, source.readMax);
+            if (verdict != FolderFeedMerge.CACHE_USABLE) {
+                source.cacheMiss = verdict;
                 return false;
             }
             // Neither end is taken from the database: it cannot tell where history begins (one request
             // when scrolling back there), and for channels without live updates both the cache and the
             // dialog's top message can be stale, so a network page confirms the newest end.
-            setProbeResult(source, scan, false, false, liveVersion);
+            MERGE.setProbeResult(source, scan, false, false, liveVersion);
             return true;
         });
     }
@@ -846,25 +762,22 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
         ArrayList<FolderFeedCache.Request> requests = new ArrayList<>();
         for (Source source : session.sources) {
             if (!source.aroundDone) {
-                requests.add(new FolderFeedCache.Request(source.dialogId, 0, session.anchorDate, AROUND_OLDER, AROUND_NEWER));
+                requests.add(new FolderFeedCache.Request(source.dialogId, 0, session.anchorDate, FolderFeedMerge.AROUND_OLDER, FolderFeedMerge.AROUND_NEWER));
             }
         }
         MessagesController controller = MessagesController.getInstance(currentAccount);
         readCache(session, requests, CACHE_KIND_AROUND, (source, window, liveVersion) -> {
-            WindowScan scan = scanWindow(window, source, 0, session.anchorDate);
+            FolderFeedMerge.WindowScan<TLRPC.Message> scan = MERGE.scanWindow(window, source, 0, session.anchorDate);
             TLRPC.Dialog dialog = controller.dialogs_dict.get(source.dialogId);
             boolean atTop = dialog != null && scan.maxId >= dialog.top_message;
             // Usable when it spans the opening point: posts on both sides of it, or nothing newer exists.
-            if (scan.olderCount == 0) {
-                source.cacheMiss = CACHE_MISS_NO_EARLIER;
-                return false;
-            }
-            if (scan.newerCount == 0 && !atTop) {
-                source.cacheMiss = CACHE_MISS_NO_LATER;
+            int verdict = FolderFeedMerge.aroundCacheVerdict(scan, atTop);
+            if (verdict != FolderFeedMerge.CACHE_USABLE) {
+                source.cacheMiss = verdict;
                 return false;
             }
             // As for the probe window, a network page confirms the newest end.
-            applyWindow(session, source, scan.messages, false, false);
+            MERGE.applyWindow(source, scan.messages, session.anchorDate, false, false, dialogTop(source.dialogId));
             source.aroundDone = true;
             return true;
         });
@@ -875,8 +788,7 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
         boolean onWindow(Source source, ArrayList<TLRPC.Message> window, int liveVersionAtRead);
     }
 
-    private static final int CACHE_MISS_NO_EARLIER = 1;
-    private static final int CACHE_MISS_NO_LATER = 2;
+    private static final int CACHE_MISS_NO_EARLIER = FolderFeedMerge.CACHE_MISS_NO_EARLIER;
 
     private static final int CACHE_KIND_PROBE = 0;
     private static final int CACHE_KIND_AROUND = 1;
@@ -951,41 +863,9 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
     private void readLatestCache(Session session) {
         ArrayList<FolderFeedCache.Request> requests = new ArrayList<>();
         for (Source source : session.sources) {
-            requests.add(new FolderFeedCache.Request(source.dialogId, 0, Integer.MAX_VALUE, FETCH_LIMIT, 0));
+            requests.add(new FolderFeedCache.Request(source.dialogId, 0, Integer.MAX_VALUE, FolderFeedMerge.FETCH_LIMIT, 0));
         }
-        MessagesController controller = MessagesController.getInstance(currentAccount);
-        readCache(session, requests, CACHE_KIND_LATEST, (source, window, liveVersion) -> {
-            WindowScan scan = scanWindow(window, source, 0, Integer.MAX_VALUE);
-            TLRPC.Dialog dialog = controller.dialogs_dict.get(source.dialogId);
-            if (dialog == null || scan.maxId != dialog.top_message || !source.older.buffer.isEmpty() || source.older.offsetId != 0) {
-                return false;
-            }
-            TLRPC.Message oldest = null;
-            for (TLRPC.Message message : scan.messages) {
-                if (oldest == null || message.id < oldest.id) {
-                    oldest = message;
-                }
-                if (isPost(message, source) && source.seen.add(message.id)) {
-                    source.older.buffer.add(message);
-                }
-            }
-            sortNewestFirst(source.older.buffer);
-            // Older posts continue from the network, below the cached ones.
-            source.older.offsetId = oldest.id;
-            source.older.frontier = oldest.date;
-            return true;
-        });
-    }
-
-    private static void setProbeResult(Source source, WindowScan scan, boolean olderEnd, boolean newerEnd, int liveVersion) {
-        // Any unread message, service ones included: the feed only needs a time at or before the
-        // channel's first unread post.
-        source.firstUnreadDate = scan.firstAfterPivot != null ? scan.firstAfterPivot.date : 0;
-        source.probeWindow = scan.messages;
-        source.probeOlderEnd = olderEnd;
-        source.probeNewerEnd = newerEnd;
-        source.probeLiveVersion = liveVersion;
-        source.probeDone = true;
+        readCache(session, requests, CACHE_KIND_LATEST, (source, window, liveVersion) -> MERGE.seedLatest(source, window, dialogTop(source.dialogId)));
     }
 
     /** Saves a page fetched for a channel into the local database, like a channel's own pages. */
@@ -995,40 +875,24 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
 
     /** The posts around the read pointer: the channel's first unread one, and usually its starting window. */
     private void probe(Session session, Source source) {
-        TLRPC.TL_messages_getHistory req = new TLRPC.TL_messages_getHistory();
-        req.peer = source.peer;
-        // AROUND_NEWER from the read post on (it may be gone), and AROUND_OLDER before it.
-        req.offset_id = source.readMax;
-        req.add_offset = -AROUND_NEWER;
-        req.limit = AROUND_NEWER + AROUND_OLDER;
+        TLRPC.TL_messages_getHistory req = historyRequest(source, FolderFeedMerge.probeQuery(source));
         final int liveVersion = source.liveVersion;
         sendHistory(session, source.opening, req, res -> {
             saveToCache(source, res.messages, MessagesController.LOAD_AROUND_DATE, 0);
-            WindowScan scan = scanWindow(res.messages, source, source.readMax, 0);
-            setProbeResult(source, scan, scan.olderCount < AROUND_OLDER, scan.newerCount < AROUND_NEWER, liveVersion);
+            MERGE.onProbePage(source, res.messages, liveVersion);
         }, () -> source.probeDone = true);
     }
 
     /** The posts around the opening point. */
     private void loadAround(Session session, Source source) {
-        TLRPC.TL_messages_getHistory req = new TLRPC.TL_messages_getHistory();
-        req.peer = source.peer;
-        // AROUND_NEWER at or after the opening point, AROUND_OLDER before it.
-        req.offset_date = session.anchorDate;
-        req.add_offset = -AROUND_NEWER;
-        req.limit = AROUND_NEWER + AROUND_OLDER;
+        TLRPC.TL_messages_getHistory req = historyRequest(source, FolderFeedMerge.aroundQuery(session.anchorDate));
         final int liveVersion = source.liveVersion;
         sendHistory(session, source.opening, req, res -> {
             saveToCache(source, res.messages, MessagesController.LOAD_AROUND_DATE, 0);
-            WindowScan scan = scanWindow(res.messages, source, 0, session.anchorDate);
-            applyWindow(session, source, scan.messages, scan.olderCount < AROUND_OLDER, scan.newerCount < AROUND_NEWER && source.liveVersion == liveVersion);
-            source.aroundDone = true;
+            MERGE.onAroundPage(source, res.messages, session.anchorDate, liveVersion, dialogTop(source.dialogId));
         }, () -> {
             // The channel cannot be read (e.g. it became private): leave it out of the feed.
-            source.older.exhausted = true;
-            source.newer.exhausted = true;
-            setNewerStart(source, null);
-            source.aroundDone = true;
+            MERGE.onAroundGaveUp(source, dialogTop(source.dialogId));
         });
     }
 
@@ -1038,60 +902,19 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
      * message is older has nothing there, so its posts load only when the feed is scrolled back to them.
      */
     private void prepareAround(Session session) {
-        MessagesController controller = MessagesController.getInstance(currentAccount);
         for (Source source : session.sources) {
-            ArrayList<TLRPC.Message> window = source.probeWindow;
-            source.probeWindow = null;
-            if (source.aroundDone) {
-                continue;
-            }
-            if (window != null) {
-                int oldestDate = Integer.MAX_VALUE;
-                for (TLRPC.Message message : window) {
-                    oldestDate = Math.min(oldestDate, message.date);
-                }
-                if (source.probeOlderEnd || oldestDate < session.anchorDate) {
-                    applyWindow(session, source, window, source.probeOlderEnd, source.probeNewerEnd && source.liveVersion == source.probeLiveVersion);
-                    source.aroundDone = true;
-                    continue;
-                }
-            }
-            TLRPC.Dialog dialog = controller.dialogs_dict.get(source.dialogId);
-            if (dialog != null && dialog.last_message_date > 0 && dialog.last_message_date < session.anchorDate) {
-                initAtDialogTop(source);
-                source.aroundDone = true;
-            }
+            MERGE.prepareAround(source, session.anchorDate, dialogTop(source.dialogId));
         }
     }
 
-    /**
-     * Sets a channel's starting state from a contiguous window of its history (messages of the channel
-     * only): posts from the opening point on go to the newer edge, earlier ones to the older edge.
-     */
-    private void applyWindow(Session session, Source source, List<TLRPC.Message> messages, boolean olderExhausted, boolean newerExhausted) {
-        TLRPC.Message oldestOlder = null, newestNewer = null, newest = null;
-        for (TLRPC.Message message : messages) {
-            if (newest == null || message.id > newest.id) newest = message;
-            boolean newer = message.date >= session.anchorDate;
-            if (newer) {
-                if (newestNewer == null || message.id > newestNewer.id) newestNewer = message;
-            } else {
-                if (oldestOlder == null || message.id < oldestOlder.id) oldestOlder = message;
-            }
-            if (isPost(message, source) && source.seen.add(message.id)) {
-                source.edge(newer).buffer.add(message);
-            }
-        }
-        sortNewestFirst(source.older.buffer);
-        sortOldestFirst(source.newer.buffer);
-        if (oldestOlder != null) {
-            source.older.offsetId = oldestOlder.id;
-            source.older.frontier = oldestOlder.date;
-        }
-        source.older.exhausted = olderExhausted || oldestOlder == null;
-        // With nothing at or after the opening point yet, newer posts, once they arrive, follow the newest one.
-        setNewerStart(source, newestNewer != null ? newestNewer : newest);
-        source.newer.exhausted = newerExhausted;
+    private static TLRPC.TL_messages_getHistory historyRequest(Source source, FolderFeedMerge.Query query) {
+        TLRPC.TL_messages_getHistory req = new TLRPC.TL_messages_getHistory();
+        req.peer = source.peer;
+        req.offset_id = query.offsetId;
+        req.offset_date = query.offsetDate;
+        req.add_offset = query.addOffset;
+        req.limit = query.limit;
+        return req;
     }
 
     private void postProgress(Session session) {
@@ -1109,36 +932,16 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
     }
 
     private void emitInitialAround(Session session) {
-        ArrayList<TLRPC.Message> newer = collectReady(session, true);
-        ArrayList<TLRPC.Message> older = collectReady(session, false);
-        ArrayList<TLRPC.Message> all = new ArrayList<>(newer.size() + older.size());
-        all.addAll(newer);
-        all.addAll(older);
+        FolderFeedMerge.Initial<TLRPC.Message> initial = MERGE.takeInitial(session.sources, session.restoreDialogId, session.restoreMessageId, session.anchorDate);
         // Newest first; ids grow outwards from ID_BASE: this page takes ID_BASE..ID_BASE+n-1.
-        int n = all.size();
-        session.nextOlderId = ID_BASE - 1;
-        session.nextNewerId = ID_BASE + n;
+        int n = initial.messages.size();
+        int topId = session.ids.initial(n);
         ArrayList<MessageObject> messageObjects = new ArrayList<>(n);
-        int firstUnreadId = 0;
-        int restoreId = 0;
-        boolean restoreExact = false;
         for (int i = 0; i < n; i++) {
-            TLRPC.Message message = all.get(i);
-            messageObjects.add(toMessageObject(message, ID_BASE + n - 1 - i));
-            long dialogId = MessageObject.getDialogId(message);
-            Source source = session.sourcesById.get(dialogId);
-            if (session.restoreDialogId != 0) {
-                // The saved post, or if it is gone, the oldest post at or after its time.
-                if (dialogId == session.restoreDialogId && message.realId == session.restoreMessageId) {
-                    restoreId = message.id;
-                    restoreExact = true;
-                } else if (!restoreExact && message.date >= session.anchorDate) {
-                    restoreId = message.id;
-                }
-            } else if (source != null && source.hasUnread() && message.realId > source.readMax) {
-                firstUnreadId = message.id;
-            }
+            messageObjects.add(toMessageObject(initial.messages.get(i), topId - i));
         }
+        int firstUnreadId = session.restoreDialogId == 0 && initial.firstUnreadIndex >= 0 ? topId - initial.firstUnreadIndex : 0;
+        int restoreId = initial.restoreIndex >= 0 ? topId - initial.restoreIndex : 0;
         session.initialPending = false;
         postPage(session, messageObjects, LOADED_INITIAL, session.initialLoadIndex, firstUnreadId, restoreId,
                 !hasMore(session, false), !hasMore(session, true));
@@ -1184,28 +987,15 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
     // --- paging on either edge: merge by date with per-channel frontiers ---
 
     private void processEdge(Session session, boolean newer) {
-        ArrayList<TLRPC.Message> ready = collectReady(session, newer);
-        if (ready.size() >= PAGE_SIZE || !anyEdgeLeft(session, newer)) {
-            emitEdge(session, newer, capPage(session, ready, newer));
+        ArrayList<TLRPC.Message> page = MERGE.takePage(session.sources, newer);
+        if (page != null) {
+            emitEdge(session, newer, page);
             return;
         }
-        // Not enough posts for a page yet: keep them buffered and move the watermark by fetching more.
-        // Channels go in frontier order (newest frontier first for older pages, oldest first for newer
-        // ones), so the ones holding the merge back are fetched first; the parallelism limit lets a few
-        // more be prefetched alongside.
-        restoreToBuffers(session, ready, newer);
-        ArrayList<Source> candidates = new ArrayList<>();
-        for (Source source : session.sources) {
-            Edge edge = source.edge(newer);
-            if (!edge.inFlight && !edge.exhausted) {
-                candidates.add(source);
-            }
-        }
-        if (newer) {
-            Collections.sort(candidates, (a, b) -> Integer.compare(a.newer.frontier, b.newer.frontier));
-        } else {
-            Collections.sort(candidates, (a, b) -> Integer.compare(b.older.frontier, a.older.frontier));
-        }
+        // Not enough posts for a page yet: they stay buffered, and fetching more moves the watermark.
+        // Channels go in frontier order, so the ones holding the merge back are fetched first; the
+        // parallelism limit lets a few more be prefetched alongside.
+        ArrayList<Source> candidates = FolderFeedMerge.fetchCandidates(session.sources, newer);
         int inFlight = inFlightCount(session);
         for (int i = 0; i < candidates.size() && inFlight < maxParallel && !isFloodPaused(session); i++, inFlight++) {
             fetchEdge(session, candidates.get(i), newer);
@@ -1213,47 +1003,13 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
         // pump() runs again whenever a request completes.
     }
 
-    /** Keeps at most MAX_PAGE_SIZE posts, those next to the loaded range; the rest goes back to the buffers. */
-    private ArrayList<TLRPC.Message> capPage(Session session, ArrayList<TLRPC.Message> ready, boolean newer) {
-        if (ready.size() <= MAX_PAGE_SIZE) {
-            return ready;
-        }
-        // ready is newest first: an older page continues from its newest posts, a newer page from its oldest.
-        int from = newer ? ready.size() - MAX_PAGE_SIZE : 0;
-        ArrayList<TLRPC.Message> page = new ArrayList<>(ready.subList(from, from + MAX_PAGE_SIZE));
-        ArrayList<TLRPC.Message> rest = new ArrayList<>(ready);
-        rest.subList(from, from + MAX_PAGE_SIZE).clear();
-        restoreToBuffers(session, rest, newer);
-        return page;
-    }
-
-    private static boolean anyEdgeLeft(Session session, boolean newer) {
-        for (Source source : session.sources) {
-            if (!source.edge(newer).exhausted) {
-                return true;
-            }
-        }
-        return false;
-    }
-
     private void fetchEdge(Session session, Source source, boolean newer) {
-        Edge edge = source.edge(newer);
-        TLRPC.TL_messages_getHistory req = new TLRPC.TL_messages_getHistory();
-        req.peer = source.peer;
-        req.offset_id = edge.offsetId;
-        final int requestOffsetId = edge.offsetId;
-        if (newer) {
-            // The posts right after offset_id. The window also covers offset_id itself and the post before
-            // it (filtered out), whether or not the offset post still exists.
-            req.add_offset = -FETCH_LIMIT;
-            req.limit = FETCH_LIMIT + 1;
-        } else {
-            req.limit = FETCH_LIMIT;
-        }
+        Edge<TLRPC.Message> edge = source.edge(newer);
+        FolderFeedMerge.Query query = FolderFeedMerge.edgeQuery(source, newer);
+        TLRPC.TL_messages_getHistory req = historyRequest(source, query);
+        final int requestOffsetId = query.offsetId;
         final int liveVersion = source.liveVersion;
-        // An older page from the top of a channel set up from the dialogs list around an opening point:
-        // if that entry was stale, the page can hold posts from the opening point on, which belong below.
-        final boolean splitAtAnchor = !newer && requestOffsetId == 0 && session.anchorDate > 0;
+        final int anchorDate = session.anchorDate;
         sendHistory(session, edge, req, res -> {
             if (newer && requestOffsetId != 0) {
                 saveToCache(source, res.messages, MessagesController.LOAD_FORWARD, requestOffsetId);
@@ -1265,52 +1021,7 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
             } else {
                 saveToCache(source, res.messages, MessagesController.LOAD_AROUND_DATE, 0);
             }
-            TLRPC.Message outermost = null;
-            int count = 0;
-            boolean movedBelow = false;
-            for (TLRPC.Message message : res.messages) {
-                if (!isFromSource(message, source)) {
-                    continue;
-                }
-                if (newer ? message.id <= requestOffsetId : (requestOffsetId != 0 && message.id >= requestOffsetId)) {
-                    continue;
-                }
-                count++;
-                if (outermost == null || (newer ? message.id > outermost.id : message.id < outermost.id)) {
-                    outermost = message;
-                }
-                if (!isPost(message, source) || !source.seen.add(message.id)) {
-                    continue;
-                }
-                if (splitAtAnchor && message.date >= session.anchorDate) {
-                    source.newer.buffer.add(message);
-                    movedBelow = true;
-                } else {
-                    edge.buffer.add(message);
-                }
-            }
-            if (movedBelow) {
-                sortOldestFirst(source.newer.buffer);
-            }
-            if (newer) {
-                sortOldestFirst(edge.buffer);
-            } else {
-                sortNewestFirst(edge.buffer);
-            }
-            if (outermost == null) {
-                edge.exhausted = true;
-            } else {
-                edge.offsetId = outermost.id;
-                edge.frontier = outermost.date;
-                // A newer window holds FETCH_LIMIT - 1 new posts when the offset post still exists.
-                if (count < (newer ? FETCH_LIMIT - 1 : FETCH_LIMIT)) {
-                    edge.exhausted = true;
-                }
-            }
-            if (newer && source.liveVersion != liveVersion) {
-                // A post arrived after this response was built: there is more to load.
-                edge.exhausted = false;
-            }
+            MERGE.onEdgePage(source, newer, requestOffsetId, res.messages, anchorDate, liveVersion);
         }, () -> edge.exhausted = true);
     }
 
@@ -1350,65 +1061,19 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
         }));
     }
 
-    /** Removes and returns every buffered post of the given edge that can be shown now, newest first. */
-    private static ArrayList<TLRPC.Message> collectReady(Session session, boolean newer) {
-        // Older edge: no channel can have unfetched posts newer than the highest older frontier.
-        // Newer edge: no channel can have unfetched posts older than the lowest newer frontier.
-        int watermark = newer ? Integer.MAX_VALUE : 0;
-        for (Source source : session.sources) {
-            Edge edge = source.edge(newer);
-            if (!edge.exhausted) {
-                watermark = newer ? Math.min(watermark, edge.frontier) : Math.max(watermark, edge.frontier);
-            }
-        }
-        ArrayList<TLRPC.Message> ready = new ArrayList<>();
-        for (Source source : session.sources) {
-            Iterator<TLRPC.Message> iterator = source.edge(newer).buffer.iterator();
-            while (iterator.hasNext()) {
-                TLRPC.Message message = iterator.next();
-                if (newer ? message.date <= watermark : message.date >= watermark) {
-                    ready.add(message);
-                    iterator.remove();
-                } else {
-                    break;
-                }
-            }
-        }
-        sortNewestFirst(ready);
-        return ready;
-    }
-
-    private static void restoreToBuffers(Session session, ArrayList<TLRPC.Message> messages, boolean newer) {
-        for (TLRPC.Message message : messages) {
-            Source source = session.sourcesById.get(MessageObject.getDialogId(message));
-            if (source != null) {
-                source.edge(newer).buffer.add(message);
-            }
-        }
-        for (Source source : session.sources) {
-            if (newer) {
-                sortOldestFirst(source.newer.buffer);
-            } else {
-                sortNewestFirst(source.older.buffer);
-            }
-        }
-    }
-
     private void emitEdge(Session session, boolean newer, ArrayList<TLRPC.Message> ready) {
-        // ready is newest first. Older pages continue downwards from nextOlderId, newer pages upwards.
+        // ready is newest first. Older pages continue the ids downwards, newer pages upwards.
         int n = ready.size();
         ArrayList<MessageObject> messageObjects = new ArrayList<>(n);
-        int firstId = newer ? session.nextNewerId + n - 1 : session.nextOlderId;
+        int firstId = session.ids.page(n, newer);
         for (int i = 0; i < n; i++) {
             messageObjects.add(toMessageObject(ready.get(i), firstId - i));
         }
         int loadIndex;
         if (newer) {
-            session.nextNewerId += n;
             session.loadingNewer = false;
             loadIndex = session.newerLoadIndex;
         } else {
-            session.nextOlderId -= n;
             session.loadingOlder = false;
             loadIndex = session.olderLoadIndex;
         }
@@ -1426,15 +1091,6 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
         message.realId = message.id;
         message.id = syntheticId;
         return messageObject;
-    }
-
-    private static boolean isFromSource(TLRPC.Message message, Source source) {
-        return message != null && !(message instanceof TLRPC.TL_messageEmpty) && MessageObject.getDialogId(message) == source.dialogId;
-    }
-
-    /** A post shown in the feed: from this channel and not a service message. */
-    private static boolean isPost(TLRPC.Message message, Source source) {
-        return isFromSource(message, source) && !(message instanceof TLRPC.TL_messageService);
     }
 
     private void putUsersAndChats(TLRPC.messages_Messages res) {
@@ -1501,24 +1157,6 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
         if (maxParallel < MAX_PARALLEL_REQUESTS && SystemClock.elapsedRealtime() > floodCalmUntil) {
             maxParallel++;
         }
-    }
-
-    private static void sortNewestFirst(ArrayList<TLRPC.Message> messages) {
-        Collections.sort(messages, (a, b) -> {
-            if (a.date != b.date) {
-                return Integer.compare(b.date, a.date);
-            }
-            long da = MessageObject.getDialogId(a), db = MessageObject.getDialogId(b);
-            if (da != db) {
-                return Long.compare(da, db);
-            }
-            return Integer.compare(b.id, a.id);
-        });
-    }
-
-    private static void sortOldestFirst(ArrayList<TLRPC.Message> messages) {
-        sortNewestFirst(messages);
-        Collections.reverse(messages);
     }
 
     public static boolean hasFeedMessages(ArrayList<MessageObject> messages) {
@@ -1607,16 +1245,7 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
                 if (source == null) {
                     continue;
                 }
-                source.liveVersion++;
-                if (source.newer.offsetId == 0 && (source.aroundDone || session.state == STATE_READY)) {
-                    // Nothing was known of the channel: its history starts right before the new posts.
-                    source.newer.offsetId = minId - 1;
-                    source.newer.frontier = minDate;
-                }
-                if (source.newer.offsetId != 0) {
-                    // The new posts arrive through forward paging, like scrolling down to newer posts.
-                    source.newer.exhausted = false;
-                }
+                FolderFeedMerge.onNewPosts(source, minId, minDate, source.aroundDone || session.state == STATE_READY);
                 NotificationCenter.getInstance(currentAccount).postNotificationName(NotificationCenter.cgFolderFeedNewPosts, session.guid);
             }
         }
