@@ -14,11 +14,13 @@ import static org.telegram.messenger.LocaleController.getString;
 import android.content.Context;
 import android.os.Bundle;
 import android.text.TextUtils;
+import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.View;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
+import android.widget.TextView;
 
 import org.telegram.messenger.LocaleController;
 import org.telegram.messenger.MessagesController;
@@ -160,6 +162,15 @@ public class FolderFeedActivity extends BaseFragment implements NotificationCent
         LinearLayout listLayout = new LinearLayout(getParentActivity());
         listLayout.setOrientation(LinearLayout.VERTICAL);
         builder.setView(listLayout);
+        // How the feed opened: helps tell a slow network or flood waits from a cache miss.
+        String openStats = FolderFeedController.getInstance(currentAccount).getOpenStats(getFeedGuid());
+        if (openStats != null) {
+            TextView statsView = new TextView(getParentActivity());
+            statsView.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 13);
+            statsView.setTextColor(getThemedColor(Theme.key_dialogTextGray3));
+            statsView.setText(openStats);
+            listLayout.addView(statsView, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT, 24, 0, 24, 8));
+        }
         AlertDialog dialog = builder.create();
         for (int i = 0; i < channels.size(); i++) {
             TLRPC.Chat chat = channels.get(i);
