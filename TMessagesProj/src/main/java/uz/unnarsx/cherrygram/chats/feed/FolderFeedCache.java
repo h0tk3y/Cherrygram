@@ -9,8 +9,11 @@
 
 package uz.unnarsx.cherrygram.chats.feed;
 
+import android.os.SystemClock;
 import android.text.TextUtils;
 import android.util.LongSparseArray;
+
+import androidx.annotation.Nullable;
 
 import org.telegram.SQLite.SQLiteCursor;
 import org.telegram.SQLite.SQLiteDatabase;
@@ -30,6 +33,8 @@ import org.telegram.tgnet.TLRPC;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Locale;
+import java.util.NavigableMap;
+import java.util.TreeMap;
 
 /**
  * The merged feed's use of the local message database ({@code messages_v2} / {@code messages_holes}),
@@ -63,11 +68,33 @@ final class FolderFeedCache {
         }
     }
 
+    /** Windows read for a set of requests, by channel: from this app session's memory and from the database. */
+    static final class Windows {
+        final LongSparseArray<ArrayList<TLRPC.Message>> memory = new LongSparseArray<>();
+        LongSparseArray<ArrayList<TLRPC.Message>> database = new LongSparseArray<>();
+    }
+
     /**
-     * Reads the requested windows on the storage thread. Each window is contiguous history (no hole inside),
-     * newest first, possibly empty. Users and chats they mention are loaded too. Delivered on the UI thread.
+     * Reads the requested windows: from the memory of this app session (on the calling UI thread) and from
+     * the database (on the storage thread). Each window is contiguous history, newest first, possibly empty;
+     * its messages are fresh copies the caller may change. Users and chats the database windows mention are
+     * loaded too. Delivered on the UI thread.
      */
-    static void read(int account, ArrayList<Request> requests, Utilities.Callback<LongSparseArray<ArrayList<TLRPC.Message>>> done) {
+    static void read(int account, ArrayList<Request> requests, Utilities.Callback<Windows> done) {
+        Windows windows = new Windows();
+        for (Request request : requests) {
+            ArrayList<TLRPC.Message> window = readMemoryWindow(account, request);
+            if (window != null) {
+                windows.memory.put(request.dialogId, window);
+            }
+        }
+        readDatabase(account, requests, database -> {
+            windows.database = database;
+            done.run(windows);
+        });
+    }
+
+    private static void readDatabase(int account, ArrayList<Request> requests, Utilities.Callback<LongSparseArray<ArrayList<TLRPC.Message>>> done) {
         MessagesStorage storage = MessagesStorage.getInstance(account);
         storage.getStorageQueue().postRunnable(() -> {
             LongSparseArray<ArrayList<TLRPC.Message>> result = new LongSparseArray<>();
@@ -244,6 +271,9 @@ final class FolderFeedCache {
             return;
         }
         Collections.sort(copies, (a, b) -> Integer.compare(b.id, a.id));
+        // Kept in memory whatever the database accepts below: a backward page continues the stretch that
+        // holds its offset post (maxId + 1); other pages overlap the stretch they continue.
+        remember(account, dialogId, copies, loadType == MessagesController.LOAD_BACKWARD ? maxId + 1 : 0);
         if (loadType == MessagesController.LOAD_FORWARD && (maxId == 0 || copies.get(0).id < maxId)) {
             // A forward page needs its offset (closing holes from 0 would wipe every gap below it), and
             // must reach past it.
@@ -333,6 +363,154 @@ final class FolderFeedCache {
         }
         return true;
     }
+
+    // region Memory of this app session
+
+    /**
+     * Pages the feed fetched in this app session, per channel, as contiguous stretches of history keyed by
+     * message id. It does not depend on what the database accepts (see prepareWrite), so reopening a feed in
+     * the same session finds every channel it loaded before. UI thread only.
+     */
+    private static final class Stretch {
+        final TreeMap<Integer, TLRPC.Message> byId = new TreeMap<>();
+        long lastUsed;
+
+        int minId() {
+            return byId.firstKey();
+        }
+
+        int maxId() {
+            return byId.lastKey();
+        }
+
+        boolean overlaps(Stretch other) {
+            return minId() <= other.maxId() && other.minId() <= maxId();
+        }
+    }
+
+    /** Messages kept per channel; the stretch used least recently goes first, then the farthest messages. */
+    private static final int MEMORY_PER_CHANNEL = 120;
+
+    @SuppressWarnings("unchecked")
+    private static final LongSparseArray<ArrayList<Stretch>>[] memory = new LongSparseArray[UserConfig.MAX_ACCOUNT_COUNT];
+
+    private static ArrayList<Stretch> stretches(int account, long dialogId) {
+        if (memory[account] == null) {
+            memory[account] = new LongSparseArray<>();
+        }
+        ArrayList<Stretch> list = memory[account].get(dialogId);
+        if (list == null) {
+            list = new ArrayList<>();
+            memory[account].put(dialogId, list);
+        }
+        return list;
+    }
+
+    /** Adds a contiguous page (newest first); {@code connectsTo} is a message id it continues, or 0. */
+    private static void remember(int account, long dialogId, ArrayList<TLRPC.Message> page, int connectsTo) {
+        ArrayList<Stretch> list = stretches(account, dialogId);
+        Stretch merged = new Stretch();
+        for (TLRPC.Message message : page) {
+            TLRPC.Message copy = copyOf(message);
+            if (copy != null) {
+                merged.byId.put(copy.id, copy);
+            }
+        }
+        if (merged.byId.isEmpty()) {
+            return;
+        }
+        int pageCenter = (merged.minId() + merged.maxId()) / 2;
+        for (int i = list.size() - 1; i >= 0; i--) {
+            Stretch stretch = list.get(i);
+            boolean continues = connectsTo != 0 && stretch.minId() <= connectsTo && connectsTo <= stretch.maxId();
+            if (continues || stretch.overlaps(merged)) {
+                // Overlapping stretches are each contiguous, so together they are too.
+                stretch.byId.putAll(merged.byId);
+                merged = stretch;
+                list.remove(i);
+                i = list.size();
+            }
+        }
+        merged.lastUsed = SystemClock.elapsedRealtime();
+        list.add(merged);
+        trim(list, merged, pageCenter);
+    }
+
+    private static void trim(ArrayList<Stretch> list, Stretch keep, int center) {
+        int total = 0;
+        for (Stretch stretch : list) {
+            total += stretch.byId.size();
+        }
+        Collections.sort(list, (a, b) -> Long.compare(a.lastUsed, b.lastUsed));
+        while (total > MEMORY_PER_CHANNEL && list.size() > 1 && list.get(0) != keep) {
+            total -= list.remove(0).byId.size();
+        }
+        while (keep.byId.size() > MEMORY_PER_CHANNEL) {
+            // Drop the end farther from the page just added.
+            if (center - keep.minId() > keep.maxId() - center) {
+                keep.byId.pollFirstEntry();
+            } else {
+                keep.byId.pollLastEntry();
+            }
+        }
+    }
+
+    /** The memory's window for a request, like the database's: around the pivot within one stretch. */
+    @Nullable
+    private static ArrayList<TLRPC.Message> readMemoryWindow(int account, Request request) {
+        if (memory[account] == null) {
+            return null;
+        }
+        ArrayList<Stretch> list = memory[account].get(request.dialogId);
+        if (list == null || list.isEmpty()) {
+            return null;
+        }
+        // The stretch holding the first message at or after the pivot, else the newest one before it.
+        Stretch best = null;
+        Integer bestFirstNewer = null;
+        for (Stretch stretch : list) {
+            Integer firstNewer = null;
+            for (TLRPC.Message message : stretch.byId.values()) {
+                if (request.pivotId != 0 ? message.id >= request.pivotId : message.date >= request.pivotDate) {
+                    firstNewer = message.id;
+                    break;
+                }
+            }
+            boolean hasOlder = request.pivotId != 0 ? stretch.minId() < request.pivotId : stretch.byId.firstEntry().getValue().date < request.pivotDate;
+            if (firstNewer != null && hasOlder) {
+                best = stretch;
+                bestFirstNewer = firstNewer;
+                break;
+            }
+            if (best == null || stretch.maxId() > best.maxId()) {
+                best = stretch;
+                bestFirstNewer = firstNewer;
+            }
+        }
+        best.lastUsed = SystemClock.elapsedRealtime();
+        ArrayList<TLRPC.Message> window = new ArrayList<>();
+        NavigableMap<Integer, TLRPC.Message> newer = bestFirstNewer != null ? best.byId.tailMap(bestFirstNewer, true) : new TreeMap<Integer, TLRPC.Message>();
+        NavigableMap<Integer, TLRPC.Message> older = bestFirstNewer != null ? best.byId.headMap(bestFirstNewer, false).descendingMap() : best.byId.descendingMap();
+        int count = 0;
+        for (TLRPC.Message message : newer.values()) {
+            if (count++ >= request.newerLimit) {
+                break;
+            }
+            window.add(copyOf(message));
+        }
+        count = 0;
+        for (TLRPC.Message message : older.values()) {
+            if (count++ >= request.olderLimit) {
+                break;
+            }
+            window.add(copyOf(message));
+        }
+        window.removeAll(Collections.singleton(null));
+        Collections.sort(window, (a, b) -> Integer.compare(b.id, a.id));
+        return window;
+    }
+
+    // endregion
 
     /** A deep copy of the message carrying its real id (the feed gives shown messages synthetic ids). */
     static TLRPC.Message copyOf(TLRPC.Message message) {

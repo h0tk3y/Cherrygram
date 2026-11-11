@@ -294,6 +294,7 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
         boolean cacheAsked;
         boolean cacheHadPosts;
         boolean fromCache;
+        boolean fromMemory;
         /** Why the last cached window was not used (CACHE_MISS_*), for the open stats. */
         int cacheMiss;
 
@@ -362,6 +363,9 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
         /** How the opening went, for {@link #getOpenStats(int)}. */
         final long startTime = SystemClock.elapsedRealtime();
         int requestsSent;
+        int responses;
+        long responseTimeTotal;
+        int maxInFlight;
         boolean resumeScheduled;
         int floodWaits;
         int floodWaitSeconds;
@@ -415,6 +419,10 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
     }
 
     private void begin(Session session) {
+        if (SystemClock.elapsedRealtime() > floodCalmUntil) {
+            // An earlier FLOOD_WAIT is long over: no reason to open this feed slowly.
+            maxParallel = MAX_PARALLEL_REQUESTS;
+        }
         MessagesController controller = MessagesController.getInstance(currentAccount);
         boolean anyUnread = false;
         for (TLRPC.Chat chat : getFeedChannels(currentAccount, findFilter(currentAccount, session.filterId))) {
@@ -553,10 +561,13 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
 
     private void recordOpenStats(Session session) {
         float seconds = (SystemClock.elapsedRealtime() - session.startTime) / 1000f;
-        int fromCache = 0, nothingCached = 0, noEarlier = 0, noLater = 0;
+        int fromCache = 0, fromMemory = 0, nothingCached = 0, noEarlier = 0, noLater = 0;
         for (Source source : session.sources) {
             if (source.fromCache) {
                 fromCache++;
+                if (source.fromMemory) {
+                    fromMemory++;
+                }
             } else if (source.cacheAsked) {
                 if (!source.cacheHadPosts) {
                     nothingCached++;
@@ -567,8 +578,10 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
                 }
             }
         }
+        float averageRequest = session.responses > 0 ? session.responseTimeTotal / 1000f / session.responses : 0;
         session.openStats = LocaleController.formatString(R.string.CG_FolderFeed_OpenStats, seconds, fromCache,
-                session.sources.size(), nothingCached, noEarlier, noLater, session.requestsSent, session.floodWaits, session.floodWaitSeconds);
+                session.sources.size(), fromMemory, nothingCached, noEarlier, noLater, session.requestsSent, averageRequest,
+                session.maxInFlight, session.floodWaits, session.floodWaitSeconds);
         FileLog.d("FolderFeed: " + session.openStats);
     }
 
@@ -904,17 +917,26 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
             }
             for (int i = 0; i < session.sources.size(); i++) {
                 Source source = session.sources.get(i);
-                ArrayList<TLRPC.Message> window = windows.get(source.dialogId);
-                if (hasCacheResult(source, kind) || window == null) {
+                if (hasCacheResult(source, kind)) {
+                    continue;
+                }
+                // What this app session already loaded first, then the database.
+                ArrayList<TLRPC.Message> memoryWindow = windows.memory.get(source.dialogId);
+                ArrayList<TLRPC.Message> databaseWindow = windows.database.get(source.dialogId);
+                if (memoryWindow == null && databaseWindow == null) {
                     continue;
                 }
                 source.cacheAsked = true;
-                if (window.isEmpty()) {
-                    continue;
-                }
-                source.cacheHadPosts = true;
-                if (handler.onWindow(source, window, versions[i])) {
-                    source.fromCache = true;
+                for (ArrayList<TLRPC.Message> window : new ArrayList[]{memoryWindow, databaseWindow}) {
+                    if (window == null || window.isEmpty()) {
+                        continue;
+                    }
+                    source.cacheHadPosts = true;
+                    if (handler.onWindow(source, window, versions[i])) {
+                        source.fromCache = true;
+                        source.fromMemory = window == memoryWindow;
+                        break;
+                    }
                 }
             }
             done.run();
@@ -1304,8 +1326,12 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
     private void sendHistory(Session session, Slot slot, TLRPC.TL_messages_getHistory req, HistoryHandler onResponse, Runnable onGiveUp) {
         slot.inFlight = true;
         session.requestsSent++;
+        session.maxInFlight = Math.max(session.maxInFlight, inFlightCount(session));
+        final long sentAt = SystemClock.elapsedRealtime();
         slot.reqId = ConnectionsManager.getInstance(currentAccount).sendRequest(req, (response, error) -> AndroidUtilities.runOnUIThread(() -> {
             slot.inFlight = false;
+            session.responses++;
+            session.responseTimeTotal += SystemClock.elapsedRealtime() - sentAt;
             if (sessions.get(session.guid) != session) {
                 return;
             }
