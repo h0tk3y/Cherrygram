@@ -316,6 +316,9 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
         boolean loadingNewer;
         int newerLoadIndex;
         int progressPosted = -1;
+        /** Local database reads before the network: 0 not started, 1 reading, 2 done. */
+        int probeCacheState;
+        int aroundCacheState;
 
         Session(int guid, int filterId) {
             this.guid = guid;
@@ -494,6 +497,12 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
             return;
         }
         if (session.state == STATE_PROBING) {
+            if (session.probeCacheState != 2) {
+                if (session.probeCacheState == 0) {
+                    readProbeCache(session);
+                }
+                return;
+            }
             boolean allDone = true;
             for (Source source : session.sources) {
                 if (!source.probeDone) {
@@ -523,6 +532,12 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
             }
         }
         if (session.state == STATE_AROUND) {
+            if (session.aroundCacheState != 2) {
+                if (session.aroundCacheState == 0) {
+                    readAroundCache(session);
+                }
+                return;
+            }
             boolean allDone = true;
             for (Source source : session.sources) {
                 if (!source.aroundDone) {
@@ -550,6 +565,130 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
 
     // --- opening: find the oldest first unread post, then load every channel around its time ---
 
+    /**
+     * Opening, before any request: finds each unread channel's first unread post in the local database,
+     * with the posts around its read pointer. Channels whose cached history covers it need no probe.
+     */
+    private void readProbeCache(Session session) {
+        session.probeCacheState = 1;
+        ArrayList<FolderFeedCache.Request> requests = new ArrayList<>();
+        final int[] versions = new int[session.sources.size()];
+        for (int i = 0; i < session.sources.size(); i++) {
+            Source source = session.sources.get(i);
+            versions[i] = source.liveVersion;
+            if (!source.probeDone) {
+                requests.add(new FolderFeedCache.Request(source.dialogId, source.readMax, 0, AROUND_OLDER, AROUND_NEWER));
+            }
+        }
+        if (requests.isEmpty()) {
+            session.probeCacheState = 2;
+            pump(session);
+            return;
+        }
+        FolderFeedCache.read(currentAccount, requests, windows -> {
+            if (sessions.get(session.guid) != session) {
+                return;
+            }
+            MessagesController controller = MessagesController.getInstance(currentAccount);
+            for (int i = 0; i < session.sources.size(); i++) {
+                Source source = session.sources.get(i);
+                ArrayList<TLRPC.Message> window = windows.get(source.dialogId);
+                if (source.probeDone || window == null || window.isEmpty()) {
+                    continue;
+                }
+                // Usable when it starts at or before the read pointer (so its first unread message really is
+                // the first one) and contains it.
+                TLRPC.Message first = null;
+                int minId = Integer.MAX_VALUE, maxId = 0;
+                for (TLRPC.Message message : window) {
+                    minId = Math.min(minId, message.id);
+                    maxId = Math.max(maxId, message.id);
+                    if (message.id > source.readMax && (first == null || message.id < first.id)) {
+                        first = message;
+                    }
+                }
+                if (minId > source.readMax || first == null) {
+                    continue;
+                }
+                TLRPC.Dialog dialog = controller.dialogs_dict.get(source.dialogId);
+                source.firstUnreadDate = first.date;
+                source.probeWindow = window;
+                // The database cannot tell where the channel's history begins; that costs at most one request
+                // when scrolling back there.
+                source.probeOlderEnd = false;
+                source.probeNewerEnd = dialog != null && maxId >= dialog.top_message;
+                source.probeLiveVersion = versions[i];
+                source.probeDone = true;
+            }
+            session.probeCacheState = 2;
+            pump(session);
+        });
+    }
+
+    /**
+     * Once the opening time is known: reads from the local database the posts around it of every channel
+     * still without a starting window. Channels whose cached history covers that time need no request.
+     */
+    private void readAroundCache(Session session) {
+        session.aroundCacheState = 1;
+        ArrayList<FolderFeedCache.Request> requests = new ArrayList<>();
+        final int[] versions = new int[session.sources.size()];
+        for (int i = 0; i < session.sources.size(); i++) {
+            Source source = session.sources.get(i);
+            versions[i] = source.liveVersion;
+            if (!source.aroundDone) {
+                requests.add(new FolderFeedCache.Request(source.dialogId, 0, session.anchorDate, AROUND_OLDER, AROUND_NEWER));
+            }
+        }
+        if (requests.isEmpty()) {
+            session.aroundCacheState = 2;
+            pump(session);
+            return;
+        }
+        FolderFeedCache.read(currentAccount, requests, windows -> {
+            if (sessions.get(session.guid) != session) {
+                return;
+            }
+            MessagesController controller = MessagesController.getInstance(currentAccount);
+            for (int i = 0; i < session.sources.size(); i++) {
+                Source source = session.sources.get(i);
+                ArrayList<TLRPC.Message> window = windows.get(source.dialogId);
+                if (source.aroundDone || window == null || window.isEmpty()) {
+                    continue;
+                }
+                TLRPC.Dialog dialog = controller.dialogs_dict.get(source.dialogId);
+                boolean hasOlder = false, hasNewer = false;
+                int maxId = 0;
+                for (TLRPC.Message message : window) {
+                    maxId = Math.max(maxId, message.id);
+                    if (message.date < session.anchorDate) {
+                        hasOlder = true;
+                    } else {
+                        hasNewer = true;
+                    }
+                }
+                boolean atTop = dialog != null && maxId >= dialog.top_message;
+                // Usable when it spans the opening time: posts on both sides of it, or nothing newer exists.
+                if (!hasOlder || !hasNewer && !atTop) {
+                    continue;
+                }
+                applyWindow(session, source, window, false, atTop && source.liveVersion == versions[i]);
+                source.aroundDone = true;
+            }
+            session.aroundCacheState = 2;
+            pump(session);
+        });
+    }
+
+    /** Saves a page fetched for a channel into the local database, like a channel's own pages. */
+    private void saveToCache(Source source, ArrayList<TLRPC.Message> page, int loadType, int maxId) {
+        MessagesController controller = MessagesController.getInstance(currentAccount);
+        TLRPC.Dialog dialog = controller.dialogs_dict.get(source.dialogId);
+        Integer localReadMax = controller.dialogs_read_inbox_max.get(source.dialogId);
+        int readMax = Math.max(dialog != null ? dialog.read_inbox_max_id : 0, localReadMax != null ? localReadMax : 0);
+        FolderFeedCache.write(currentAccount, source.dialogId, page, loadType, maxId, readMax);
+    }
+
     private void probe(Session session, Source source) {
         TLRPC.TL_messages_getHistory req = new TLRPC.TL_messages_getHistory();
         req.peer = source.peer;
@@ -569,6 +708,7 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
             if (response instanceof TLRPC.messages_Messages) {
                 TLRPC.messages_Messages res = (TLRPC.messages_Messages) response;
                 putUsersAndChats(res);
+                saveToCache(source, res.messages, MessagesController.LOAD_AROUND_DATE, 0);
                 // Any unread message, service ones included: the feed only needs a time at or before the
                 // channel's first unread post.
                 TLRPC.Message first = null;
@@ -622,6 +762,7 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
             if (response instanceof TLRPC.messages_Messages) {
                 TLRPC.messages_Messages res = (TLRPC.messages_Messages) response;
                 putUsersAndChats(res);
+                saveToCache(source, res.messages, MessagesController.LOAD_AROUND_DATE, 0);
                 int olderCount = 0, newerCount = 0;
                 for (TLRPC.Message message : res.messages) {
                     if (isFromSource(message, source)) {
@@ -851,6 +992,7 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
         TLRPC.TL_messages_getHistory req = new TLRPC.TL_messages_getHistory();
         req.peer = source.peer;
         req.offset_id = edge.offsetId;
+        final int requestOffsetId = edge.offsetId;
         if (newer) {
             // The posts right after offset_id. As for the probe, the window also covers offset_id itself
             // and the post before it (filtered out), whether or not the offset post still exists.
@@ -869,6 +1011,13 @@ public class FolderFeedController implements NotificationCenter.NotificationCent
             if (response instanceof TLRPC.messages_Messages) {
                 TLRPC.messages_Messages res = (TLRPC.messages_Messages) response;
                 putUsersAndChats(res);
+                if (newer) {
+                    saveToCache(source, res.messages, MessagesController.LOAD_FORWARD, requestOffsetId);
+                } else if (requestOffsetId != 0) {
+                    saveToCache(source, res.messages, MessagesController.LOAD_BACKWARD, requestOffsetId);
+                } else {
+                    saveToCache(source, res.messages, MessagesController.LOAD_AROUND_DATE, 0);
+                }
                 TLRPC.Message outermost = null;
                 int count = 0;
                 for (TLRPC.Message message : res.messages) {
