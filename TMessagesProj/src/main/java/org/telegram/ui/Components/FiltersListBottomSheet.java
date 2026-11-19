@@ -36,7 +36,8 @@ import org.telegram.tgnet.TLRPC;
 import org.telegram.ui.ActionBar.BaseFragment;
 import org.telegram.ui.ActionBar.BottomSheet;
 import org.telegram.ui.ActionBar.Theme;
-import org.telegram.ui.DialogsActivity;
+import org.telegram.ui.Components.Premium.LimitReachedBottomSheet;
+import org.telegram.ui.FilterCreateActivity;
 
 import java.util.ArrayList;
 
@@ -62,9 +63,13 @@ public class FiltersListBottomSheet extends BottomSheet implements NotificationC
     }
 
     private final ArrayList<Long> selectedDialogs;
-    private final DialogsActivity fragment;
+    private final BaseFragment fragment;
+    /** Cherrygram: stays open after a folder is picked, its checkmarks updated, until closed. */
+    private boolean stayOpen;
+    /** Cherrygram: folders that already hold every selected chat cannot be picked (nothing gets removed). */
+    private boolean addOnly;
 
-    public FiltersListBottomSheet(DialogsActivity baseFragment, ArrayList<Long> selectedDialogs) {
+    public FiltersListBottomSheet(BaseFragment baseFragment, ArrayList<Long> selectedDialogs) {
         super(baseFragment.getParentActivity(), false);
         fixNavigationBar();
         this.selectedDialogs = selectedDialogs;
@@ -218,8 +223,17 @@ public class FiltersListBottomSheet extends BottomSheet implements NotificationC
             }
         });
         listView.setOnItemClickListener((view, position) -> {
-            delegate.didSelectFilter(adapter.getItem(position), view instanceof BottomSheet.BottomSheetCell ? ((BottomSheet.BottomSheetCell) view).isChecked() : false);
-            dismiss();
+            MessagesController.DialogFilter filter = adapter.getItem(position);
+            boolean checked = view instanceof BottomSheet.BottomSheetCell ? ((BottomSheet.BottomSheetCell) view).isChecked() : false;
+            if (filter != null && checked && (addOnly || isIncludedByRules(filter))) {
+                return;
+            }
+            delegate.didSelectFilter(filter, checked);
+            if (stayOpen && filter != null) {
+                adapter.notifyItemChanged(position);
+            } else {
+                dismiss();
+            }
         });
         containerView.addView(listView, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.MATCH_PARENT, Gravity.TOP | Gravity.LEFT, 0, 48, 0, 0));
 
@@ -326,6 +340,89 @@ public class FiltersListBottomSheet extends BottomSheet implements NotificationC
 
     public void setDelegate(FiltersListBottomSheetDelegate filtersListBottomSheetDelegate) {
         delegate = filtersListBottomSheetDelegate;
+    }
+
+    /** Cherrygram: keeps the sheet open after a folder is picked, so several can be changed in a row. */
+    public void setStayOpen(boolean stayOpen) {
+        this.stayOpen = stayOpen;
+    }
+
+    /** Cherrygram: only adding: folders that already hold every selected chat are shown dimmed and do nothing. */
+    public void setAddOnly(boolean addOnly) {
+        this.addOnly = addOnly;
+    }
+
+    /**
+     * Cherrygram: in the open sheet for one chat, a folder that holds it only by its chat types (it is not one of
+     * the folder's chats) is shown dimmed and does nothing: "removing" it would not undo an add, it would silently
+     * add the chat to the folder's excluded chats.
+     */
+    private boolean isIncludedByRules(MessagesController.DialogFilter filter) {
+        return stayOpen && !addOnly && selectedDialogs.size() == 1
+                && filter.includesDialog(AccountInstance.getInstance(currentAccount), selectedDialogs.get(0))
+                // Not in alwaysShow (getDialogsCount skips those, a secret chat counted as its user).
+                && !getDialogsCount(fragment, filter, selectedDialogs, true, true).isEmpty();
+    }
+
+    /**
+     * Adds the dialogs to the folder, or removes them from it when {@code checked} (the folder already
+     * holds them all), as picked in this sheet; with no folder, opens a new one with them. Shows the
+     * premium limit sheet instead when the folder has no room. Returns false if nothing was done.
+     */
+    public static boolean applyChoice(BaseFragment fragment, ArrayList<Long> dialogs, MessagesController.DialogFilter filter, boolean checked, UndoView undoView) {
+        ArrayList<Long> alwaysShow = getDialogsCount(fragment, filter, dialogs, true, false);
+        if (!checked) {
+            int currentCount;
+            if (filter != null) {
+                currentCount = filter.alwaysShow.size();
+            } else {
+                currentCount = 0;
+            }
+            int totalCount = currentCount + alwaysShow.size();
+            MessagesController messagesController = fragment.getMessagesController();
+            if ((totalCount > messagesController.dialogFiltersChatsLimitDefault && !fragment.getUserConfig().isPremium()) || totalCount > messagesController.dialogFiltersChatsLimitPremium) {
+                fragment.showDialog(new LimitReachedBottomSheet(fragment, fragment.getContext(), LimitReachedBottomSheet.TYPE_CHATS_IN_FOLDER, fragment.getCurrentAccount(), null));
+                return false;
+            }
+        }
+        if (filter != null) {
+            if (checked) {
+                for (int a = 0; a < dialogs.size(); a++) {
+                    filter.neverShow.add(dialogs.get(a));
+                    filter.alwaysShow.remove(dialogs.get(a));
+                }
+                FilterCreateActivity.saveFilterToServer(filter, filter.flags, filter.emoticon, filter.name, filter.entities, filter.title_noanimate, filter.color, filter.alwaysShow, filter.neverShow, filter.pinnedDialogs, false, false, true, true, false, fragment, null);
+                long did;
+                if (dialogs.size() == 1) {
+                    did = dialogs.get(0);
+                } else {
+                    did = 0;
+                }
+                if (undoView != null) {
+                    undoView.showWithAction(did, UndoView.ACTION_REMOVED_FROM_FOLDER, dialogs.size(), filter, null, null);
+                }
+            } else {
+                if (!alwaysShow.isEmpty()) {
+                    for (int a = 0; a < alwaysShow.size(); a++) {
+                        filter.neverShow.remove(alwaysShow.get(a));
+                    }
+                    filter.alwaysShow.addAll(alwaysShow);
+                    FilterCreateActivity.saveFilterToServer(filter, filter.flags, filter.emoticon, filter.name, filter.entities, filter.title_noanimate, filter.color, filter.alwaysShow, filter.neverShow, filter.pinnedDialogs, false, false, true, true, false, fragment, null);
+                }
+                long did;
+                if (alwaysShow.size() == 1) {
+                    did = alwaysShow.get(0);
+                } else {
+                    did = 0;
+                }
+                if (undoView != null) {
+                    undoView.showWithAction(did, UndoView.ACTION_ADDED_TO_FOLDER, alwaysShow.size(), filter, null, null);
+                }
+            }
+        } else {
+            fragment.presentFragment(new FilterCreateActivity(null, alwaysShow));
+        }
+        return true;
     }
 
     public static ArrayList<MessagesController.DialogFilter> getCanAddDialogFilters(BaseFragment fragment, ArrayList<Long> selectedDialogs) {
@@ -444,7 +541,9 @@ public class FiltersListBottomSheet extends BottomSheet implements NotificationC
                     }
                 }
                 cell.setChecked(isChecked);
+                cell.setAlpha(isChecked && (addOnly || isIncludedByRules(filter)) ? 0.5f : 1.0f);
             } else {
+                cell.setAlpha(1.0f);
                 cell.getImageView().setColorFilter(null);
                 Drawable drawable1 = context.getResources().getDrawable(R.drawable.poll_add_circle);
                 Drawable drawable2 = context.getResources().getDrawable(R.drawable.poll_add_plus);

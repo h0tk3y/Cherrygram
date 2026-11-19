@@ -157,6 +157,24 @@
     <string name="CP_Filters_Header">Папкі</string>
     <string name="AP_FolderNameInHeader">Назва папкі заміж \"Cherrygram\"</string>
     <string name="AP_FolderNameInHeader_Desc">Гэта зменіць \"Cherrygram\" у загалоўку зверху на назву Вашай папкі (зручна пры адлюстраванні іконкаў замест назваў папкаў)</string>
+    <string name="CG_FolderFeed">Агульная стужка каналаў</string>
+    <string name="CG_FolderFeed_Desc">Чытайце ўсе каналы папкі ў адным чаце. Даступна ў папках, дзе не менш за два каналы.</string>
+    <string name="CG_FolderFeed_Entry">Спосаб адкрыцця стужкі</string>
+    <string name="CG_FolderFeed_Entry_Pinned">Замацаваны пункт у папцы</string>
+    <string name="CG_FolderFeed_Entry_ActionBar">Кнопка на верхняй панэлі</string>
+    <string name="CG_FolderFeed_Entry_Both">Абодва варыянты</string>
+    <string name="CG_FolderFeed_Title">Усе каналы</string>
+    <string name="CG_FolderFeed_EntrySubtitle">Чытаць %1$s у адной стужцы</string>
+    <string name="CG_FolderFeed_EntrySubtitle_AllChannels">Чытаць каналы гэтай папкі ў адной стужцы</string>
+    <string name="CG_FolderFeed_Open">Чытаць каналы разам</string>
+    <string name="CG_FolderFeed_Channels">Каналы ў гэтай стужцы</string>
+    <string name="CG_FolderFeed_NextUnread">Наступны непрачытаны допіс</string>
+    <string name="CG_FolderFeed_Loading">Загрузка каналаў: %1$d з %2$d…</string>
+    <string name="CG_FolderFeed_LoadingChats">Загрузка чатаў…</string>
+    <string name="CG_FolderFeed_ChannelsCount_one">%1$d канал</string>
+    <string name="CG_FolderFeed_ChannelsCount_few">%1$d каналы</string>
+    <string name="CG_FolderFeed_ChannelsCount_many">%1$d каналаў</string>
+    <string name="CG_FolderFeed_ChannelsCount_other">%1$d каналаў</string>
     <string name="CP_NewTabs_RemoveAllChats">Схаваць ўкладку \"Усе чаты\"</string>
     <string name="AP_Tab_Style">Стыль укладкі</string>
     <string name="AP_Tab_Style_Stroke">Дадаць абвядзенне</string>
@@ -258,4 +276,9 @@
     <string name="DP_RateUs">Ацаніць Cherrygram</string>
     <!--Donations-->
     <!--Cherrygram screens-->
+
+    <string name="CG_QuickFolderActions">Хуткія дзеянні з папкамі</string>
+    <string name="CG_QuickFolderActions_Desc">Глядзіце і змяняйце папкі чата на экране інфармацыі пра яго, а чаты, выбраныя ў спісе, дадавайце ў папкі з любой укладкі.</string>
+    <string name="CG_QuickFolderActions_NotInFolders">Няма ні ў адной папцы</string>
+
 </resources>

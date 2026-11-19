@@ -289,6 +289,24 @@
     <string name="AP_FoldersAtBottom">Показывать папки снизу</string>
     <string name="AP_FolderNameInHeader">Название папки вместо \"Cherrygram\"</string>
     <string name="AP_FolderNameInHeader_Desc">Это изменит \"Cherrygram\" в заголовке сверху на название Вашей папки (удобно при отображении иконок вместо названий папок)</string>
+    <string name="CG_FolderFeed">Общая лента каналов</string>
+    <string name="CG_FolderFeed_Desc">Читайте все каналы папки в одном чате. Доступно в папках, где не меньше двух каналов.</string>
+    <string name="CG_FolderFeed_Entry">Способ открытия ленты</string>
+    <string name="CG_FolderFeed_Entry_Pinned">Закреплённый пункт в папке</string>
+    <string name="CG_FolderFeed_Entry_ActionBar">Кнопка на верхней панели</string>
+    <string name="CG_FolderFeed_Entry_Both">Оба варианта</string>
+    <string name="CG_FolderFeed_Title">Все каналы</string>
+    <string name="CG_FolderFeed_EntrySubtitle">Читать %1$s в одной ленте</string>
+    <string name="CG_FolderFeed_EntrySubtitle_AllChannels">Читать каналы этой папки в одной ленте</string>
+    <string name="CG_FolderFeed_Open">Читать каналы вместе</string>
+    <string name="CG_FolderFeed_Channels">Каналы в этой ленте</string>
+    <string name="CG_FolderFeed_NextUnread">Следующий непрочитанный пост</string>
+    <string name="CG_FolderFeed_Loading">Загрузка каналов: %1$d из %2$d…</string>
+    <string name="CG_FolderFeed_LoadingChats">Загрузка чатов…</string>
+    <string name="CG_FolderFeed_ChannelsCount_one">%1$d канал</string>
+    <string name="CG_FolderFeed_ChannelsCount_few">%1$d канала</string>
+    <string name="CG_FolderFeed_ChannelsCount_many">%1$d каналов</string>
+    <string name="CG_FolderFeed_ChannelsCount_other">%1$d каналов</string>
     <string name="CP_NewTabs_RemoveAllChats">Скрыть папку \"Все чаты\"</string>
     <string name="AP_Tab_Style">Стиль папок</string>
     <string name="AP_Tab_Style_Stroke">Добавить обводку</string>
@@ -583,5 +601,10 @@
     <string name="AS_DigitalGoods">Цифровые товары</string>
     <!--Alternative Support-->
     <!--Cherrygram screens-->
+
+
+    <string name="CG_QuickFolderActions">Быстрые действия с папками</string>
+    <string name="CG_QuickFolderActions_Desc">Смотрите и меняйте папки чата на экране информации о нём, а чаты, выбранные в списке, добавляйте в папки с любой вкладки.</string>
+    <string name="CG_QuickFolderActions_NotInFolders">Нет ни в одной папке</string>
 
 </resources>

@@ -32,6 +32,7 @@ import org.telegram.ui.SettingsActivity;
 import java.util.ArrayList;
 
 import uz.unnarsx.cherrygram.core.configs.CherrygramAppearanceConfig;
+import uz.unnarsx.cherrygram.core.configs.CherrygramChatsConfig;
 import uz.unnarsx.cherrygram.core.firebase.FirebaseAnalyticsHelper;
 import uz.unnarsx.cherrygram.core.helpers.DeeplinkHelper;
 import uz.unnarsx.cherrygram.donates.DonatesManager;
@@ -55,6 +56,8 @@ public class FoldersPreferencesEntry extends BaseCGPreferencesEntry {
     private final int foldersAtBottomRow = 7;
 
     private final int telegramFoldersSettings = 8;
+
+    private final int quickFolderActionsRow = 9;
 
     @Override
     protected CharSequence getTitle() {
@@ -102,6 +105,12 @@ public class FoldersPreferencesEntry extends BaseCGPreferencesEntry {
         items.add(SettingsHelper.asSwitchCG(foldersAtBottomRow, applyProSpan(getString(R.string.AP_FoldersAtBottom), getResourceProvider()))
                 .setChecked(CherrygramAppearanceConfig.INSTANCE.getFoldersAtBottom()).setLocked(!DonatesManager.INSTANCE.didUserDonateForFeature())
                 .slug("foldersAtBottom")
+        );
+        items.add(UItem.asShadow(null));
+
+        items.add(SettingsHelper.asSwitchCG(quickFolderActionsRow, applyNewSpan(getString(R.string.CG_QuickFolderActions)), getString(R.string.CG_QuickFolderActions_Desc))
+                .setChecked(CherrygramChatsConfig.INSTANCE.getQuickFolderActions())
+                .slug("quickFolderActions")
         );
         items.add(UItem.asShadow(null));
 
@@ -193,6 +202,9 @@ public class FoldersPreferencesEntry extends BaseCGPreferencesEntry {
             SettingsHelper.updateCheckState(view, CherrygramAppearanceConfig.INSTANCE.getFoldersAtBottom());
 
             showRestartBulletin();
+        } else if (item.id == quickFolderActionsRow) {
+            CherrygramChatsConfig.INSTANCE.setQuickFolderActions(!CherrygramChatsConfig.INSTANCE.getQuickFolderActions());
+            SettingsHelper.updateCheckState(view, CherrygramChatsConfig.INSTANCE.getQuickFolderActions());
         } else if (item.id == telegramFoldersSettings) {
             presentFragment(new FiltersSetupActivity());
         }

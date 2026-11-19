@@ -86,7 +86,10 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Objects;
 
+import uz.unnarsx.cherrygram.chats.feed.FolderFeedController;
+import uz.unnarsx.cherrygram.chats.feed.FolderFeedEntryCell;
 import uz.unnarsx.cherrygram.core.configs.CherrygramAppearanceConfig;
+import uz.unnarsx.cherrygram.core.configs.CherrygramChatsConfig;
 
 public class DialogsAdapter extends RecyclerListView.SelectionAdapter implements DialogCell.DialogCellDelegate {
     public final static int VIEW_TYPE_DIALOG = 0,
@@ -112,7 +115,8 @@ public class DialogsAdapter extends RecyclerListView.SelectionAdapter implements
             VIEW_TYPE_GRAY_SECTION = 20,
             VIEW_TYPE_FORWARD_TO_STORIES_CELL = 21,
             VIEW_TYPE_HEADER_3 = 22,
-            VIEW_TYPE_DIALOG_COMMUNITY = 23;
+            VIEW_TYPE_DIALOG_COMMUNITY = 23,
+            VIEW_TYPE_FOLDER_FEED = 100;
 
     private Context mContext;
     private ArchiveHintCell archiveHintCell;
@@ -130,6 +134,7 @@ public class DialogsAdapter extends RecyclerListView.SelectionAdapter implements
     private ArrayList<Long> selectedDialogs;
     private boolean hasHints;
     private boolean hasChatlistHint;
+    private boolean hasFolderFeedEntry;
     private int currentAccount;
     private boolean dialogsListFrozen;
     private boolean isReordering;
@@ -185,6 +190,9 @@ public class DialogsAdapter extends RecyclerListView.SelectionAdapter implements
 
     public int fixPosition(int position) {
         if (hasChatlistHint) {
+            position--;
+        }
+        if (hasFolderFeedEntry) {
             position--;
         }
         if (hasHints) {
@@ -386,6 +394,8 @@ public class DialogsAdapter extends RecyclerListView.SelectionAdapter implements
             this.emptyType = viewTypeEmpty;
             if (viewTypeEmpty == VIEW_TYPE_LAST_EMPTY) {
                 stableId = 1;
+            } else if (viewTypeEmpty == VIEW_TYPE_FOLDER_FEED) {
+                stableId = 6;
             } else {
                 if (viewType == VIEW_TYPE_ARCHIVE_FULLSCREEN) {
                     stableId = 5;
@@ -846,6 +856,9 @@ public class DialogsAdapter extends RecyclerListView.SelectionAdapter implements
             case VIEW_TYPE_FOLDER_UPDATE_HINT:
                 view = new DialogsHintCell(mContext);
                 break;
+            case VIEW_TYPE_FOLDER_FEED:
+                view = new FolderFeedEntryCell(mContext, null);
+                break;
             case VIEW_TYPE_STORIES: {
                 view = new View(mContext) {
                     @Override
@@ -1166,6 +1179,10 @@ public class DialogsAdapter extends RecyclerListView.SelectionAdapter implements
             case VIEW_TYPE_REQUIREMENTS: {
                 RequestPeerRequirementsCell cell = (RequestPeerRequirementsCell) holder.itemView;
                 cell.set(requestPeerType);
+                break;
+            }
+            case VIEW_TYPE_FOLDER_FEED: {
+                ((FolderFeedEntryCell) holder.itemView).setFilter(currentAccount, getCurrentFilter());
                 break;
             }
             case VIEW_TYPE_FOLDER_UPDATE_HINT: {
@@ -1618,6 +1635,7 @@ public class DialogsAdapter extends RecyclerListView.SelectionAdapter implements
 
         itemInternals.clear();
         updateHasHints();
+        hasFolderFeedEntry = false;
 
         MessagesController messagesController = MessagesController.getInstance(currentAccount);
 
@@ -1707,6 +1725,14 @@ public class DialogsAdapter extends RecyclerListView.SelectionAdapter implements
 
         if (requestPeerType != null) {
             itemInternals.add(new ItemInternal(VIEW_TYPE_REQUIREMENTS));
+        }
+
+        // Cherrygram: pinned entry opening the merged feed of the folder's channels.
+        if ((dialogsType == 7 || dialogsType == 8) && requestPeerType == null && parentFragment != null && !parentFragment.isOnlySelect()
+                && CherrygramChatsConfig.INSTANCE.getFolderChannelsFeed() && CherrygramChatsConfig.INSTANCE.showFolderFeedPinnedEntry()
+                && FolderFeedController.isAvailableForFilter(currentAccount, filter)) {
+            itemInternals.add(new ItemInternal(VIEW_TYPE_FOLDER_FEED));
+            hasFolderFeedEntry = true;
         }
 
         if (collapsedView || isTransitionSupport) {

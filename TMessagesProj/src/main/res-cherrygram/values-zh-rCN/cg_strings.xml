@@ -209,6 +209,24 @@
     <string name="AP_FoldersAtBottom">在底部显示文件夹</string>
     <string name="AP_FolderNameInHeader">使用文件夹名称而非 \"Cherrygram\"</string>
     <string name="AP_FolderNameInHeader_Desc">这会将操作栏中的“Cherrygram”更改为文件夹名称 (开启仅显示图标时效果最佳)</string>
+    <string name="CG_FolderFeed">频道合并信息流</string>
+    <string name="CG_FolderFeed_Desc">在一个聊天中阅读文件夹内的所有频道。适用于至少包含两个频道的文件夹。</string>
+    <string name="CG_FolderFeed_Entry">信息流入口</string>
+    <string name="CG_FolderFeed_Entry_Pinned">文件夹中的置顶入口</string>
+    <string name="CG_FolderFeed_Entry_ActionBar">操作栏按钮</string>
+    <string name="CG_FolderFeed_Entry_Both">两者</string>
+    <string name="CG_FolderFeed_Title">所有频道</string>
+    <string name="CG_FolderFeed_EntrySubtitle">在一个信息流中阅读 %1$s</string>
+    <string name="CG_FolderFeed_EntrySubtitle_AllChannels">在一个信息流中阅读此文件夹的频道</string>
+    <string name="CG_FolderFeed_Open">合并阅读频道</string>
+    <string name="CG_FolderFeed_Channels">此信息流中的频道</string>
+    <string name="CG_FolderFeed_NextUnread">下一条未读帖子</string>
+    <string name="CG_FolderFeed_Loading">正在加载频道（%1$d/%2$d）…</string>
+    <string name="CG_FolderFeed_LoadingChats">正在加载聊天…</string>
+    <string name="CG_FolderFeed_ChannelsCount_one">%1$d 个频道</string>
+    <string name="CG_FolderFeed_ChannelsCount_few">%1$d 个频道</string>
+    <string name="CG_FolderFeed_ChannelsCount_many">%1$d 个频道</string>
+    <string name="CG_FolderFeed_ChannelsCount_other">%1$d 个频道</string>
     <string name="CP_NewTabs_RemoveAllChats">隐藏所有聊天Tab</string>
     <string name="AP_Tab_Style">Tab 样式</string>
     <string name="AP_Tab_Style_Stroke">添加描边</string>
@@ -446,4 +464,9 @@
     <string name="DP_Donate_ExclusiveDesc">支持本项目来解锁所有功能。</string>
     <!--Donations-->
     <!--Cherrygram screens-->
+
+    <string name="CG_QuickFolderActions">快捷文件夹操作</string>
+    <string name="CG_QuickFolderActions_Desc">在聊天的资料页查看并更改其所在文件夹，并可在任意文件夹标签中将聊天列表里选中的聊天添加到文件夹。</string>
+    <string name="CG_QuickFolderActions_NotInFolders">不在任何文件夹中</string>
+
 </resources>

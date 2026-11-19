@@ -226,6 +226,24 @@
     <string name="AP_FoldersAtBottom">Mostra le cartelle in basso</string>
     <string name="AP_FolderNameInHeader">Nome cartella invece di \"Cherrygram\"</string>
     <string name="AP_FolderNameInHeader_Desc">Sostituisce il titolo \'Cherrygram\' sulla barra in alto con il nome della cartella corrente (utile se hai solo icone al posto dei nomi delle cartelle)</string>
+    <string name="CG_FolderFeed">Feed unificato dei canali</string>
+    <string name="CG_FolderFeed_Desc">Leggi tutti i canali di una cartella in un\'unica chat. Disponibile nelle cartelle con almeno due canali.</string>
+    <string name="CG_FolderFeed_Entry">Apri il feed da</string>
+    <string name="CG_FolderFeed_Entry_Pinned">Voce fissata nella cartella</string>
+    <string name="CG_FolderFeed_Entry_ActionBar">Pulsante nella barra superiore</string>
+    <string name="CG_FolderFeed_Entry_Both">Entrambi</string>
+    <string name="CG_FolderFeed_Title">Tutti i canali</string>
+    <string name="CG_FolderFeed_EntrySubtitle">Leggi %1$s in un unico feed</string>
+    <string name="CG_FolderFeed_EntrySubtitle_AllChannels">Leggi i canali di questa cartella in un unico feed</string>
+    <string name="CG_FolderFeed_Open">Leggi i canali insieme</string>
+    <string name="CG_FolderFeed_Channels">Canali in questo feed</string>
+    <string name="CG_FolderFeed_NextUnread">Prossimo post non letto</string>
+    <string name="CG_FolderFeed_Loading">Caricamento canali: %1$d di %2$d…</string>
+    <string name="CG_FolderFeed_LoadingChats">Caricamento chat…</string>
+    <string name="CG_FolderFeed_ChannelsCount_one">%1$d canale</string>
+    <string name="CG_FolderFeed_ChannelsCount_few">%1$d canali</string>
+    <string name="CG_FolderFeed_ChannelsCount_many">%1$d canali</string>
+    <string name="CG_FolderFeed_ChannelsCount_other">%1$d canali</string>
     <string name="CP_NewTabs_RemoveAllChats">Nascondi la cartella \"Tutte le chat\"</string>
     <string name="AP_Tab_Style">Stili di cartella</string>
     <string name="AP_Tab_Style_Stroke">Aggiungi stroke</string>
@@ -464,4 +482,9 @@
     <string name="DP_Donate_ExclusiveDesc">Supporta il progetto per sbloccare tutte le funzionalità.</string>
     <!--Donations-->
     <!--Cherrygram screens-->
+
+    <string name="CG_QuickFolderActions">Azioni rapide sulle cartelle</string>
+    <string name="CG_QuickFolderActions_Desc">Vedi e modifica le cartelle di una chat dalla sua schermata info, e aggiungi alle cartelle le chat selezionate nell\'elenco da qualsiasi scheda cartella.</string>
+    <string name="CG_QuickFolderActions_NotInFolders">Non è in nessuna cartella</string>
+
 </resources>

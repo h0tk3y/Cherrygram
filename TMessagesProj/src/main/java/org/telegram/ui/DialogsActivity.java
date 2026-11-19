@@ -282,6 +282,9 @@ import java.util.concurrent.ConcurrentHashMap;
 import me.vkryl.android.util.ClickHelper;
 import uz.unnarsx.cherrygram.chats.CGChatMenuInjector;
 import uz.unnarsx.cherrygram.chats.ui.MessageMenuHelper;
+import uz.unnarsx.cherrygram.chats.feed.FolderFeedActivity;
+import uz.unnarsx.cherrygram.chats.feed.FolderFeedController;
+import uz.unnarsx.cherrygram.chats.feed.FolderFeedEntryCell;
 import uz.unnarsx.cherrygram.core.configs.CherrygramAppearanceConfig;
 import uz.unnarsx.cherrygram.core.configs.CherrygramChatsConfig;
 import uz.unnarsx.cherrygram.core.CGBiometricPrompt;
@@ -515,6 +518,7 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
     private ValueAnimator contactsAlphaAnimator;
     private ViewPage[] viewPages;
     private ActionBarMenuItem passcodeItem;
+    private ActionBarMenuItem folderFeedItem;
     private ActionBarMenuItem downloadsItem;
     private DownloadProgressIcon downloadProgressIcon;
     private boolean downloadsItemVisible;
@@ -2883,6 +2887,9 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
     @Override
     public boolean onFragmentCreate() {
         super.onFragmentCreate();
+        // Cherrygram: created before this screen's observers, so the merged feed's folder cache is cleared
+        // before this screen reads it on folder and dialog list changes (observers run in that order).
+        FolderFeedController.getInstance(currentAccount);
 
         if (CherrygramMessagesConfig.INSTANCE.getEnableMsgFilters() && CherrygramMessagesConfig.INSTANCE.getMsgFiltersHideFromBlocked()) {
             getMessagesController().getBlockedPeers(false);
@@ -3346,6 +3353,11 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
 
             passcodeItem = menu.addItem(1, R.drawable.outline_header_lock_24);
             passcodeItem.setContentDescription(getString(R.string.AccDescrPasscodeLock));
+
+            folderFeedItem = menu.addItem(48, R.drawable.msg_folders_channels);
+            folderFeedItem.setContentDescription(getString(R.string.CG_FolderFeed_Open));
+            folderFeedItem.setVisibility(View.GONE);
+            folderFeedItem.setOnClickListener(v -> FolderFeedActivity.open(DialogsActivity.this, getCurrentFolderFeedFilter()));
 
             downloadsItem = menu.addItem(3, new ColorDrawable(Color.TRANSPARENT));
             downloadsItem.addView(downloadProgressIcon = new DownloadProgressIcon(currentAccount, context));
@@ -3894,6 +3906,9 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
                                 filterTabsView.setIsEditing(true);
                                 showDoneItem(true);
                             })
+                            .addIf(!defaultTab && FolderFeedController.isAvailableForFilter(currentAccount, dialogFilter), R.drawable.msg_folders_channels, getString(R.string.CG_FolderFeed_Open), () -> {
+                                FolderFeedActivity.open(DialogsActivity.this, dialogFilter);
+                            })
                             .add(R.drawable.msg_edit, defaultTab ? LocaleController.getString(R.string.FilterEditAll) : LocaleController.getString(R.string.FilterEdit), () -> {
                                 presentFragment(defaultTab ? new FiltersSetupActivity() : new FilterCreateActivity(dialogFilter));
                             })
@@ -3946,6 +3961,8 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
 
                 @Override
                 public void onTabSelected(FilterTabsView.Tab tab, boolean forward, boolean animated) {
+                    ArrayList<MessagesController.DialogFilter> feedFilters = getMessagesController().getDialogFilters();
+                    updateFolderFeedItem(tab != null && tab.id >= 0 && tab.id < feedFilters.size() ? feedFilters.get(tab.id) : null);
                     if (actionBar != null) {
                         if (CherrygramAppearanceConfig.INSTANCE.getFolderNameInHeader()) {
                             if (dialogStoriesCell != null) {
@@ -4030,64 +4047,30 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
                 } else if (id == 11) {
                     openAccountSelector(switchItem);
                 } else if (id == add_to_folder) {
-                    FiltersListBottomSheet sheet = new FiltersListBottomSheet(DialogsActivity.this, selectedDialogs);
+                    // Cherrygram: with quick folder actions, the sheet stays open: one chat can be added to and
+                    // removed from several folders in a row, several chats only added.
+                    boolean quickFolderActions = CherrygramChatsConfig.INSTANCE.getQuickFolderActions();
+                    ArrayList<Long> dialogs = new ArrayList<>(selectedDialogs);
+                    boolean[] changed = new boolean[1];
+                    FiltersListBottomSheet sheet = new FiltersListBottomSheet(DialogsActivity.this, dialogs);
+                    sheet.setStayOpen(quickFolderActions);
+                    sheet.setAddOnly(quickFolderActions && dialogs.size() > 1);
                     sheet.setDelegate((filter, checked) -> {
-                        ArrayList<Long> alwaysShow = FiltersListBottomSheet.getDialogsCount(DialogsActivity.this, filter, selectedDialogs, true, false);
-                        if (!checked) {
-                            int currentCount;
-                            if (filter != null) {
-                                currentCount = filter.alwaysShow.size();
-                            } else {
-                                currentCount = 0;
-                            }
-                            int totalCount = currentCount + alwaysShow.size();
-                            if ((totalCount > getMessagesController().dialogFiltersChatsLimitDefault && !getUserConfig().isPremium()) || totalCount > getMessagesController().dialogFiltersChatsLimitPremium) {
-                                showDialog(new LimitReachedBottomSheet(DialogsActivity.this, fragmentView.getContext(), LimitReachedBottomSheet.TYPE_CHATS_IN_FOLDER, currentAccount, null));
-                                return;
-                            }
+                        // One chat in the open sheet: its checkmarks show each change (and a second tap undoes it).
+                        UndoView undoView = quickFolderActions && dialogs.size() == 1 ? null : getUndoView();
+                        if (!FiltersListBottomSheet.applyChoice(DialogsActivity.this, dialogs, filter, checked, undoView)) {
+                            return;
                         }
-                        if (filter != null) {
-                            if (checked) {
-                                for (int a = 0; a < selectedDialogs.size(); a++) {
-                                    filter.neverShow.add(selectedDialogs.get(a));
-                                    filter.alwaysShow.remove(selectedDialogs.get(a));
-                                }
-                                FilterCreateActivity.saveFilterToServer(filter, filter.flags, filter.emoticon, filter.name, filter.entities, filter.title_noanimate, filter.color, filter.alwaysShow, filter.neverShow, filter.pinnedDialogs, false, false, true, true, false, DialogsActivity.this, null);
-                                long did;
-                                if (selectedDialogs.size() == 1) {
-                                    did = selectedDialogs.get(0);
-                                } else {
-                                    did = 0;
-                                }
-                                final UndoView undoView = getUndoView();
-                                if (undoView != null) {
-                                    undoView.showWithAction(did, UndoView.ACTION_REMOVED_FROM_FOLDER, selectedDialogs.size(), filter, null, null);
-                                }
-                            } else {
-                                if (!alwaysShow.isEmpty()) {
-                                    for (int a = 0; a < alwaysShow.size(); a++) {
-                                        filter.neverShow.remove(alwaysShow.get(a));
-                                    }
-                                    filter.alwaysShow.addAll(alwaysShow);
-                                    FilterCreateActivity.saveFilterToServer(filter, filter.flags, filter.emoticon, filter.name, filter.entities, filter.title_noanimate, filter.color, filter.alwaysShow, filter.neverShow, filter.pinnedDialogs, false, false, true, true, false, DialogsActivity.this, null);
-                                }
-                                long did;
-                                if (alwaysShow.size() == 1) {
-                                    did = alwaysShow.get(0);
-                                } else {
-                                    did = 0;
-                                }
-                                final UndoView undoView = getUndoView();
-                                if (undoView != null) {
-                                    undoView.showWithAction(did, UndoView.ACTION_ADDED_TO_FOLDER, alwaysShow.size(), filter, null, null);
-                                }
-                            }
-                        } else {
-                            presentFragment(new FilterCreateActivity(null, alwaysShow));
+                        changed[0] = true;
+                        if (!quickFolderActions || filter == null) {
+                            hideActionMode(true);
                         }
-                        hideActionMode(true);
                     });
-                    showDialog(sheet);
+                    showDialog(sheet, dialog -> {
+                        if (quickFolderActions && changed[0] && actionBar != null && actionBar.isActionModeShowed()) {
+                            hideActionMode(true);
+                        }
+                    });
                 } else if (id == remove_from_folder) {
                     MessagesController.DialogFilter filter = getMessagesController().getDialogFilters().get(viewPages[0].selectedType);
                     ArrayList<Long> neverShow = FiltersListBottomSheet.getDialogsCount(DialogsActivity.this, filter, selectedDialogs, false, false);
@@ -4532,6 +4515,9 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
                         }
                     });
                     presentFragment(activity);
+                    return;
+                } else if (view instanceof FolderFeedEntryCell) {
+                    FolderFeedActivity.open(DialogsActivity.this, ((FolderFeedEntryCell) view).getFilter());
                     return;
                 } else if (view instanceof DialogsHintCell && (viewPage.dialogsType == 7 || viewPage.dialogsType == 8)) {
                     TL_chatlists.TL_chatlists_chatlistUpdates updates = viewPage.dialogsAdapter.getChatlistUpdate();
@@ -6992,6 +6978,10 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
         }
 
         viewPages[a].dialogsAdapter.setDialogsType(viewPages[a].dialogsType);
+        if (a == 0) {
+            // Page 1 is the page a swipe is moving to: the button follows once the switch completes.
+            updateFolderFeedItem(filter.isDefault() ? null : filter);
+        }
         viewPages[a].layoutManager.scrollToPositionWithOffset(viewPages[a].dialogsType == DIALOGS_TYPE_DEFAULT && hasHiddenArchive() && viewPages[a].archivePullViewState == ARCHIVE_ITEM_STATE_HIDDEN ? 1 : 0, (int) scrollYOffset);
         checkListLoad(viewPages[a]);
     }
@@ -7198,6 +7188,7 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
     @Override
     public void onResume() {
         super.onResume();
+        updateFolderFeedItem();
         if (dialogStoriesCell != null) {
             dialogStoriesCell.onResume();
         }
@@ -8468,7 +8459,7 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
     }
 
     private boolean onItemLongClick(RecyclerListView listView, View view, int position, float x, float y, int dialogsType, RecyclerListView.Adapter adapter) {
-        if (getParentActivity() == null || view instanceof DialogsHintCell) {
+        if (getParentActivity() == null || view instanceof DialogsHintCell || view instanceof FolderFeedEntryCell) {
             return false;
         }
         if (adapter.getItemViewType(position) == DialogsAdapter.VIEW_TYPE_FORWARD_TO_STORIES_CELL) {
@@ -10204,7 +10195,10 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
             }
         }
         if (addToFolderItem != null) {
-            if (folderId == 1 || filterTabsView != null && getFilterTabsVisibilityFactor(false) > 0.5f && filterTabsView.currentTabIsDefault() && !FiltersListBottomSheet.getCanAddDialogFilters(this, selectedDialogs).isEmpty()) {
+            boolean canAddHere = folderId == 1 || filterTabsView != null && getFilterTabsVisibilityFactor(false) > 0.5f && filterTabsView.currentTabIsDefault()
+                    // Cherrygram: from any folder tab, too.
+                    || CherrygramChatsConfig.INSTANCE.getQuickFolderActions();
+            if (canAddHere && !FiltersListBottomSheet.getCanAddDialogFilters(this, selectedDialogs).isEmpty()) {
                 addToFolderItem.setVisibility(View.VISIBLE);
             } else {
                 addToFolderItem.setVisibility(View.GONE);
@@ -10778,6 +10772,7 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
             if (viewPages == null || dialogsListFrozen) {
                 return;
             }
+            updateFolderFeedItem();
             for (int a = 0; a < viewPages.length; a++) {
                 final ViewPage viewPage = viewPages[a];
                 MessagesController.DialogFilter filter = null;
@@ -11000,6 +10995,7 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
             }
         } else if (id == NotificationCenter.dialogFiltersUpdated) {
             updateFilterTabs(true, true);
+            updateFolderFeedItem();
         } else if (id == NotificationCenter.filterSettingsUpdated) {
             showFiltersHint();
         } else if (id == NotificationCenter.newSuggestionsAvailable) {
@@ -11557,6 +11553,11 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
             int count = list.getChildCount();
             for (int a = 0; a < count; a++) {
                 View child = list.getChildAt(a);
+                if (child instanceof FolderFeedEntryCell) {
+                    // Cherrygram: keep the merged feed entry's unread badge in sync with read states.
+                    ((FolderFeedEntryCell) child).updateUnreadCounter(animated);
+                    continue;
+                }
                 if (child instanceof DialogCell) {
                     if (searchViewPager == null || list.getAdapter() != searchViewPager.dialogsSearchAdapter) {
                         DialogCell cell = (DialogCell) child;
@@ -14423,6 +14424,7 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
         checkUi_itemDownloadsVisibility();
         checkUi_itemSpeedVisibility();
         checkUi_itemPasscodeVisibility();
+        checkUi_itemFolderFeedVisibility();
         checkUi_itemSearchVisibility();
     }
 
@@ -14916,6 +14918,50 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
                 AndroidUtilities.runOnUIThread(() -> reloadViewPageDialogs(viewPage, true), 160);
             }
         }*/
+    }
+
+    public boolean isOnlySelect() {
+        return onlySelect;
+    }
+
+    /** Folder currently shown in the main dialogs list, or null for "All chats" / other lists. */
+    private MessagesController.DialogFilter getCurrentFolderFeedFilter() {
+        if (viewPages == null || viewPages[0] == null) {
+            return null;
+        }
+        int type = viewPages[0].dialogsType;
+        if (type == DIALOGS_TYPE_FOLDER1 || type == DIALOGS_TYPE_FOLDER2) {
+            return getMessagesController().selectedDialogFilter[type == DIALOGS_TYPE_FOLDER2 ? 1 : 0];
+        }
+        return null;
+    }
+
+    private void updateFolderFeedItem() {
+        updateFolderFeedItem(getCurrentFolderFeedFilter());
+    }
+
+    private boolean folderFeedItemVisible;
+
+    private void updateFolderFeedItem(MessagesController.DialogFilter filter) {
+        if (folderFeedItem == null) {
+            return;
+        }
+        // The folder's channels are only all known once the chat list (and archive) is fully loaded.
+        FolderFeedController.getInstance(currentAccount).requestAllDialogs(filter);
+        folderFeedItemVisible = CherrygramChatsConfig.INSTANCE.showFolderFeedActionBarButton() && FolderFeedController.isAvailableForFilter(currentAccount, filter);
+        checkUi_itemFolderFeedVisibility();
+    }
+
+    /** Hidden like the other action bar items while searching, sliding or editing tabs. */
+    private void checkUi_itemFolderFeedVisibility() {
+        if (folderFeedItem == null) {
+            return;
+        }
+        final float factor0 = folderFeedItemVisible ? 1 : 0;
+        final float factor1 = 1f - animatorSearchVisible.getFloatValue();
+        final float factor2 = 1f - getRightSlidingProgress();
+        final float factor3 = 1f - animatorDoneButtonVisible.getFloatValue();
+        FragmentFloatingButton.setAnimatedVisibility(folderFeedItem, factor0 * factor1 * factor2 * factor3);
     }
     /** Cherrygram finish */
 

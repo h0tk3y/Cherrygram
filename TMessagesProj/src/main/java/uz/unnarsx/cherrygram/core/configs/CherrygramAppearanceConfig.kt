@@ -71,6 +71,7 @@ object CherrygramAppearanceConfig {
     var tabStyleStroke by sharedPreferences.boolean("AP_TabStyleAddStroke", false)
     var folderNameInHeader by sharedPreferences.boolean("AP_FolderNameInHeader", false)
     var foldersAtBottom by sharedPreferences.boolean("AP_FoldersAtBottom", false)
+
     /** Folders finish */
 
     /** Main tabs start */

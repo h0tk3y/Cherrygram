@@ -228,6 +228,24 @@ as configurações do sistema. Esta característica apaga completamente todas as
     <string name="AP_FoldersAtBottom">Exibir pastas na parte inferior</string>
     <string name="AP_FolderNameInHeader">Nome da pasta em vez de \"Cherrygram\"</string>
     <string name="AP_FolderNameInHeader_Desc">Isso vai mudar \"Cherrygram\" na barra de ações para o nome da sua pasta (útil se tem apenas ícones ao invés de nome das pastas)</string>
+    <string name="CG_FolderFeed">Feed unificado de canais</string>
+    <string name="CG_FolderFeed_Desc">Leia todos os canais de uma pasta em um único chat. Disponível em pastas com pelo menos dois canais.</string>
+    <string name="CG_FolderFeed_Entry">Abrir o feed por</string>
+    <string name="CG_FolderFeed_Entry_Pinned">Item fixado na pasta</string>
+    <string name="CG_FolderFeed_Entry_ActionBar">Botão na barra superior</string>
+    <string name="CG_FolderFeed_Entry_Both">Ambos</string>
+    <string name="CG_FolderFeed_Title">Todos os canais</string>
+    <string name="CG_FolderFeed_EntrySubtitle">Ler %1$s em um só feed</string>
+    <string name="CG_FolderFeed_EntrySubtitle_AllChannels">Ler os canais desta pasta em um só feed</string>
+    <string name="CG_FolderFeed_Open">Ler canais juntos</string>
+    <string name="CG_FolderFeed_Channels">Canais neste feed</string>
+    <string name="CG_FolderFeed_NextUnread">Próxima publicação não lida</string>
+    <string name="CG_FolderFeed_Loading">Carregando %1$d de %2$d canais…</string>
+    <string name="CG_FolderFeed_LoadingChats">Carregando chats…</string>
+    <string name="CG_FolderFeed_ChannelsCount_one">%1$d canal</string>
+    <string name="CG_FolderFeed_ChannelsCount_few">%1$d canais</string>
+    <string name="CG_FolderFeed_ChannelsCount_many">%1$d canais</string>
+    <string name="CG_FolderFeed_ChannelsCount_other">%1$d canais</string>
     <string name="CP_NewTabs_RemoveAllChats">Esconder o separador \"Todos os chats\"</string>
     <string name="AP_Tab_Style">Estilo de pestaña</string>
     <string name="AP_Tab_Style_Stroke">Adicionar traço</string>
@@ -462,4 +480,9 @@ Se uma correspondência for encontrada dentro do link, toda a mensagem será aut
     <string name="DP_Donate_ExclusiveDesc">Apoie o projeto e desbloqueie todos os recursos.</string>
     <!--Donations-->
     <!--Cherrygram screens-->
+
+    <string name="CG_QuickFolderActions">Ações rápidas de pastas</string>
+    <string name="CG_QuickFolderActions_Desc">Veja e altere as pastas de um chat na tela de informações dele, e adicione a pastas os chats selecionados na lista a partir de qualquer aba de pasta.</string>
+    <string name="CG_QuickFolderActions_NotInFolders">Não está em nenhuma pasta</string>
+
 </resources>

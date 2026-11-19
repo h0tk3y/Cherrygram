@@ -153,6 +153,24 @@
     <string name="CP_Filters_Header">Ordner</string>
     <string name="AP_FolderNameInHeader">Ordnername anstatt \"Cherrygram\"</string>
     <string name="AP_FolderNameInHeader_Desc">Dies ändert \"Cherrygram\" in der Aktionsleiste auf den Namen Ihres Ordners (nützlich, wenn Sie nur Symbole statt Ordnernamen haben)</string>
+    <string name="CG_FolderFeed">Gemeinsamer Kanal-Feed</string>
+    <string name="CG_FolderFeed_Desc">Lesen Sie alle Kanäle eines Ordners in einem einzigen Chat. Verfügbar in Ordnern mit mindestens zwei Kanälen.</string>
+    <string name="CG_FolderFeed_Entry">Feed öffnen über</string>
+    <string name="CG_FolderFeed_Entry_Pinned">Angehefteter Eintrag im Ordner</string>
+    <string name="CG_FolderFeed_Entry_ActionBar">Schaltfläche in der Aktionsleiste</string>
+    <string name="CG_FolderFeed_Entry_Both">Beides</string>
+    <string name="CG_FolderFeed_Title">Alle Kanäle</string>
+    <string name="CG_FolderFeed_EntrySubtitle">%1$s in einem Feed lesen</string>
+    <string name="CG_FolderFeed_EntrySubtitle_AllChannels">Kanäle dieses Ordners in einem Feed lesen</string>
+    <string name="CG_FolderFeed_Open">Kanäle gemeinsam lesen</string>
+    <string name="CG_FolderFeed_Channels">Kanäle in diesem Feed</string>
+    <string name="CG_FolderFeed_NextUnread">Nächster ungelesener Beitrag</string>
+    <string name="CG_FolderFeed_Loading">Kanäle werden geladen: %1$d von %2$d…</string>
+    <string name="CG_FolderFeed_LoadingChats">Chats werden geladen…</string>
+    <string name="CG_FolderFeed_ChannelsCount_one">%1$d Kanal</string>
+    <string name="CG_FolderFeed_ChannelsCount_few">%1$d Kanäle</string>
+    <string name="CG_FolderFeed_ChannelsCount_many">%1$d Kanäle</string>
+    <string name="CG_FolderFeed_ChannelsCount_other">%1$d Kanäle</string>
     <string name="CP_NewTabs_RemoveAllChats">\"Alle Chat\"-Tab ausblenden</string>
     <string name="AP_Tab_Style">Tab style</string>
     <string name="AP_Tab_Style_Stroke">Add stroke</string>
@@ -252,4 +270,9 @@
     <!--Donations-->
     <!--Donations-->
     <!--Cherrygram screens-->
+
+    <string name="CG_QuickFolderActions">Schnelle Ordneraktionen</string>
+    <string name="CG_QuickFolderActions_Desc">Die Ordner eines Chats in seiner Info-Ansicht sehen und ändern, und in der Chatliste ausgewählte Chats aus jedem Ordner-Tab zu Ordnern hinzufügen.</string>
+    <string name="CG_QuickFolderActions_NotInFolders">In keinem Ordner</string>
+
 </resources>

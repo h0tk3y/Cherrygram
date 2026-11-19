@@ -1,0 +1,39 @@
+# Diagnoses logins to Telegram's test servers (ci/emulator/tg_login_probe.py). Fast (no APK build),
+# and in its own concurrency group, so it does not cancel the folder feed pipeline.
+name: Test-server login probe
+
+on:
+  push:
+    branches:
+      - claude/telegram-merged-folder-channels-clolue
+    paths:
+      - ci/emulator/tg_login_probe.py
+      - .github/workflows/tg-login-probe.yml
+  workflow_dispatch:
+
+concurrency:
+  group: tg-login-probe
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Probe test-server logins
+        env:
+          TG_APP_ID: ${{ secrets.TG_APP_ID }}
+          TG_APP_HASH: ${{ secrets.TG_APP_HASH }}
+        run: |
+          pip install -q telethon==1.45.0 tdjson==1.8.70
+          python3 ci/emulator/tg_login_probe.py

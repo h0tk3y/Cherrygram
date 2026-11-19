@@ -5227,9 +5227,11 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                         }
                         args.putLong("chat_id", -dialogId);
                     }
-                    args.putInt("message_id", currentMessageObject.getId());
+                    // Merged folder feed / hashtag search messages carry synthetic ids.
+                    final int realMessageId = currentMessageObject.isFolderFeedMessage || currentMessageObject.searchType != 0 ? currentMessageObject.getRealId() : currentMessageObject.getId();
+                    args.putInt("message_id", realMessageId);
                     if (id == gallery_menu_reply) {
-                        args.putInt("reply_to", currentMessageObject.getId());
+                        args.putInt("reply_to", realMessageId);
                     }
                     NotificationCenter.getInstance(currentAccount).postNotificationName(NotificationCenter.closeChats);
                     if (parentActivity instanceof LaunchActivity) {

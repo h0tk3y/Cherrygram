@@ -283,6 +283,7 @@ import org.telegram.ui.Components.TimerDrawable;
 import org.telegram.ui.Components.TranslateAlert2;
 import org.telegram.ui.Components.TypefaceSpan;
 import org.telegram.ui.Components.UItem;
+import org.telegram.ui.Components.FiltersListBottomSheet;
 import org.telegram.ui.Components.UndoView;
 import org.telegram.ui.Components.VectorAvatarThumbDrawable;
 import org.telegram.ui.Components.blur3.BlurredBackgroundDrawableViewFactory;
@@ -2248,6 +2249,7 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
         sharedMediaPreloader.addDelegate(this);
 
         getNotificationCenter().addObserver(this, NotificationCenter.updateInterfaces);
+        getNotificationCenter().addObserver(this, NotificationCenter.dialogFiltersUpdated);
         getNotificationCenter().addObserver(this, NotificationCenter.didReceiveNewMessages);
         getNotificationCenter().addObserver(this, NotificationCenter.closeChats);
         getNotificationCenter().addObserver(this, NotificationCenter.closeProfileActivity);
@@ -2397,6 +2399,7 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
         }
 
         getNotificationCenter().removeObserver(this, NotificationCenter.updateInterfaces);
+        getNotificationCenter().removeObserver(this, NotificationCenter.dialogFiltersUpdated);
         getNotificationCenter().removeObserver(this, NotificationCenter.closeChats);
         getNotificationCenter().removeObserver(this, NotificationCenter.closeProfileActivity);
         getNotificationCenter().removeObserver(this, NotificationCenter.didReceiveNewMessages);
@@ -4402,6 +4405,10 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
                 return;
             }
             listView.stopScroll();
+            if (position == foldersRow) {
+                showFoldersSheet();
+                return;
+            }
             if (position == idDcRow && (userId != 0 || chatId != 0)){
                 long id;
                 if (userId != 0) {
@@ -9225,7 +9232,11 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
     @SuppressWarnings("unchecked")
     @Override
     public void didReceivedNotification(int id, int account, final Object... args) {
-        if (id == NotificationCenter.uploadStoryEnd || id == NotificationCenter.chatWasBoostedByUser) {
+        if (id == NotificationCenter.dialogFiltersUpdated) {
+            if (foldersRow >= 0 && listAdapter != null) {
+                listAdapter.notifyItemChanged(foldersRow);
+            }
+        } else if (id == NotificationCenter.uploadStoryEnd || id == NotificationCenter.chatWasBoostedByUser) {
             checkCanSendStoryForPosting();
         } else if (id == NotificationCenter.updateInterfaces) {
             int mask = (Integer) args[0];
@@ -10701,6 +10712,7 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
         birthdayRow = -1;
         setUsernameRow = -1;
         idDcRow = -1;
+        foldersRow = -1;
         bioRow = -1;
         channelRow = -1;
         channelDividerRow = -1;
@@ -10986,6 +10998,9 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
                         noteRow = rowCount++;
                     }
                 }
+                if (showFoldersRow()) {
+                    foldersRow = rowCount++;
+                }
                 if (actionsView == null && userId != getUserConfig().getClientUserId()) {
                     notificationsRow = rowCount++;
                 }
@@ -11155,6 +11170,9 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
 
             if (CherrygramAppearanceConfig.INSTANCE.getShowIDDC()) {
                 idDcRow = rowCount++;
+            }
+            if (showFoldersRow()) {
+                foldersRow = rowCount++;
             }
 
             if (actionsView == null) {
@@ -13818,6 +13836,8 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
                         CharSequence formattedID = chatId != 0 ? "-100 " + df.format(id) : df.format(id);
 
                         detailCell.setTextAndValue("ID: " + formattedID, userDcLine, false);
+                    } else if (position == foldersRow) {
+                        detailCell.setTextAndValue(getFoldersText(detailCell.textView.getPaint().getFontMetricsInt()), getString(R.string.Filters), false);
                     } else if (position == birthdayRow) {
                         TLRPC.UserFull userFull = getMessagesController().getUserFull(userId);
                         if (userFull != null && userFull.birthday != null) {
@@ -14730,7 +14750,7 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
                         position == clearLogsRow || position == switchBackendRow || position == setAvatarRow ||
                         position == addToGroupButtonRow || position == premiumRow || position == premiumGiftingRow ||
                         position == businessRow || position == liteModeRow || position == birthdayRow || position == channelRow ||
-                        position == starsRow || position == tonRow || position == linkedCommunityRow || position == idDcRow;
+                        position == starsRow || position == tonRow || position == linkedCommunityRow || position == idDcRow || position == foldersRow;
             }
             if (holder.itemView instanceof UserCell) {
                 UserCell userCell = (UserCell) holder.itemView;
@@ -14758,7 +14778,7 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
             if (position == infoHeaderRow || position == membersHeaderRow || position == settingsSectionRow2 ||
                     position == numberSectionRow || position == helpHeaderRow || position == debugHeaderRow || position == botPermissionsHeader) {
                 return VIEW_TYPE_HEADER;
-            } else if (position == idDcRow || position == phoneRow || position == locationRow || position == numberRow || position == birthdayRow) {
+            } else if (position == idDcRow || position == phoneRow || position == locationRow || position == numberRow || position == birthdayRow || position == foldersRow) {
                 return VIEW_TYPE_TEXT_DETAIL;
             } else if (position == usernameRow || position == setUsernameRow) {
                 return VIEW_TYPE_TEXT_DETAIL_MULTILINE;
@@ -15980,6 +16000,60 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
         }
     }
 
+    // region Cherrygram: quick folder actions
+
+    /** The chat whose folders the Folders row shows: the user (also for a secret chat with them) or the group/channel. */
+    private long getFoldersDialogId() {
+        if (userId != 0) {
+            return userId;
+        }
+        return chatId != 0 ? -chatId : 0;
+    }
+
+    /** The Folders row is shown for chats in the chat list (only those can be in folders). */
+    private boolean showFoldersRow() {
+        if (!CherrygramChatsConfig.INSTANCE.getQuickFolderActions()) {
+            return false;
+        }
+        long did = getFoldersDialogId();
+        return did != 0 && getMessagesController().dialogs_dict.get(did) != null;
+    }
+
+    /** The names of the folders that hold the chat, or "Not in any folder". */
+    private CharSequence getFoldersText(Paint.FontMetricsInt fontMetrics) {
+        long did = getFoldersDialogId();
+        SpannableStringBuilder names = new SpannableStringBuilder();
+        for (MessagesController.DialogFilter filter : getMessagesController().getDialogFilters()) {
+            if (filter.isDefault() || !filter.includesDialog(getAccountInstance(), did)) {
+                continue;
+            }
+            if (names.length() > 0) {
+                names.append(", ");
+            }
+            names.append(filter.name);
+        }
+        if (names.length() == 0) {
+            return getString(R.string.CG_QuickFolderActions_NotInFolders);
+        }
+        return Emoji.replaceEmoji(names, fontMetrics, false);
+    }
+
+    /** The stock folder sheet for this chat: it stays open, one tap adds to a folder, one tap removes. */
+    private void showFoldersSheet() {
+        ArrayList<Long> dialogs = new ArrayList<>();
+        dialogs.add(getFoldersDialogId());
+        FiltersListBottomSheet sheet = new FiltersListBottomSheet(this, dialogs);
+        sheet.setStayOpen(true);
+        sheet.setDelegate((filter, checked) -> {
+            if (FiltersListBottomSheet.applyChoice(this, dialogs, filter, checked, null) && foldersRow >= 0 && listAdapter != null) {
+                listAdapter.notifyItemChanged(foldersRow);
+            }
+        });
+        showDialog(sheet);
+    }
+
+    // endregion
+
     private boolean fullyVisible;
 
     @Override
@@ -16119,6 +16193,7 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
             put(++pointer, numberRow, sparseIntArray);
             put(++pointer, setUsernameRow, sparseIntArray);
             put(++pointer, idDcRow, sparseIntArray);
+            put(++pointer, foldersRow, sparseIntArray);
             put(++pointer, bioRow, sparseIntArray);
             put(++pointer, phoneSuggestionRow, sparseIntArray);
             put(++pointer, phoneSuggestionSectionRow, sparseIntArray);
@@ -17470,6 +17545,7 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
     public HintView2 creationDateHint;
 
     private int idDcRow;
+    private int foldersRow;
     private StringBuilder userDcLine;
 
     public AnimatedEmojiDrawable.SwapAnimatedEmojiDrawable cherrygramStatusDrawable;
