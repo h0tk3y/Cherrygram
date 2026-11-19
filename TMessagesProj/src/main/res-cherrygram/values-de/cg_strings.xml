@@ -270,4 +270,9 @@
     <!--Donations-->
     <!--Donations-->
     <!--Cherrygram screens-->
+
+    <string name="CG_QuickFolderActions">Schnelle Ordneraktionen</string>
+    <string name="CG_QuickFolderActions_Desc">Die Ordner eines Chats in seiner Info-Ansicht sehen und ändern, und in der Chatliste ausgewählte Chats aus jedem Ordner-Tab zu Ordnern hinzufügen.</string>
+    <string name="CG_QuickFolderActions_NotInFolders">In keinem Ordner</string>
+
 </resources>

@@ -276,4 +276,9 @@
     <string name="DP_RateUs">Ацаніць Cherrygram</string>
     <!--Donations-->
     <!--Cherrygram screens-->
+
+    <string name="CG_QuickFolderActions">Хуткія дзеянні з папкамі</string>
+    <string name="CG_QuickFolderActions_Desc">Глядзіце і змяняйце папкі чата на экране інфармацыі пра яго, а чаты, выбраныя ў спісе, дадавайце ў папкі з любой укладкі.</string>
+    <string name="CG_QuickFolderActions_NotInFolders">Няма ні ў адной папцы</string>
+
 </resources>

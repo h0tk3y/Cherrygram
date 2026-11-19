@@ -464,4 +464,9 @@
     <string name="DP_Donate_ExclusiveDesc">支持本项目来解锁所有功能。</string>
     <!--Donations-->
     <!--Cherrygram screens-->
+
+    <string name="CG_QuickFolderActions">快捷文件夹操作</string>
+    <string name="CG_QuickFolderActions_Desc">在聊天的资料页查看并更改其所在文件夹，并可在任意文件夹标签中将聊天列表里选中的聊天添加到文件夹。</string>
+    <string name="CG_QuickFolderActions_NotInFolders">不在任何文件夹中</string>
+
 </resources>

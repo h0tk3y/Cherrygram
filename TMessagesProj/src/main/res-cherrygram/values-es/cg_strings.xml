@@ -404,4 +404,9 @@ Si se encuentra una coincidencia dentro del enlace, el mensaje completo se ocult
     <string name="DP_Donate_ExclusiveDesc">Apoya el proyecto y desbloquea todas las funciones.</string>
     <!--Donations-->
     <!--Cherrygram screens-->
+
+    <string name="CG_QuickFolderActions">Acciones rápidas de carpetas</string>
+    <string name="CG_QuickFolderActions_Desc">Ve y cambia las carpetas de un chat desde su pantalla de información, y añade a carpetas los chats seleccionados en la lista desde cualquier pestaña de carpeta.</string>
+    <string name="CG_QuickFolderActions_NotInFolders">No está en ninguna carpeta</string>
+
 </resources>
