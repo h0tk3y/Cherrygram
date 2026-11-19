@@ -464,4 +464,9 @@
     <string name="DP_Donate_ExclusiveDesc">Supporta il progetto per sbloccare tutte le funzionalità.</string>
     <!--Donations-->
     <!--Cherrygram screens-->
+
+    <string name="CG_QuickFolderActions">Azioni rapide sulle cartelle</string>
+    <string name="CG_QuickFolderActions_Desc">Vedi e modifica le cartelle di una chat dalla sua schermata info, e aggiungi alle cartelle le chat selezionate nell\'elenco da qualsiasi scheda cartella.</string>
+    <string name="CG_QuickFolderActions_NotInFolders">Non è in nessuna cartella</string>
+
 </resources>

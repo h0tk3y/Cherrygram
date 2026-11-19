@@ -464,4 +464,9 @@
     <string name="DP_Donate_ExclusiveDesc">支持本專案以解鎖所有功能。</string>
     <!--Donations-->
     <!--Cherrygram screens-->
+
+    <string name="CG_QuickFolderActions">快速資料夾操作</string>
+    <string name="CG_QuickFolderActions_Desc">在對話的資訊頁查看並變更其所在資料夾，並可在任一資料夾分頁中將對話列表裡選取的對話加入資料夾。</string>
+    <string name="CG_QuickFolderActions_NotInFolders">不在任何資料夾中</string>
+
 </resources>

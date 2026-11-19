@@ -390,4 +390,9 @@
     <string name="DP_Donate_ExclusiveDesc">プロジェクトをサポートしてすべての機能をアンロックしましょう。</string>
     <!--Donations-->
     <!--Cherrygram screens-->
+
+    <string name="CG_QuickFolderActions">フォルダのクイック操作</string>
+    <string name="CG_QuickFolderActions_Desc">チャットの情報画面でそのチャットのフォルダを確認・変更でき、チャットリストで選択したチャットをどのフォルダタブからでもフォルダに追加できます。</string>
+    <string name="CG_QuickFolderActions_NotInFolders">どのフォルダにも入っていません</string>
+
 </resources>

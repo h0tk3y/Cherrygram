@@ -584,4 +584,9 @@
     <!--Alternative Support-->
     <!--Cherrygram screens-->
 
+
+    <string name="CG_QuickFolderActions">Быстрые действия с папками</string>
+    <string name="CG_QuickFolderActions_Desc">Смотрите и меняйте папки чата на экране информации о нём, а чаты, выбранные в списке, добавляйте в папки с любой вкладки.</string>
+    <string name="CG_QuickFolderActions_NotInFolders">Нет ни в одной папке</string>
+
 </resources>

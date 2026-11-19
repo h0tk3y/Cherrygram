@@ -514,4 +514,9 @@
     <string name="AS_DigitalGoods">Цифрові товари</string>
     <!--Alternative Support-->
     <!--Cherrygram screens-->
+
+    <string name="CG_QuickFolderActions">Швидкі дії з папками</string>
+    <string name="CG_QuickFolderActions_Desc">Переглядайте та змінюйте папки чату на екрані інформації про нього, а чати, вибрані в списку, додавайте до папок з будь-якої вкладки.</string>
+    <string name="CG_QuickFolderActions_NotInFolders">Немає в жодній папці</string>
+
 </resources>

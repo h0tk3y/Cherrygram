@@ -462,4 +462,9 @@ Se uma correspondência for encontrada dentro do link, toda a mensagem será aut
     <string name="DP_Donate_ExclusiveDesc">Apoie o projeto e desbloqueie todos os recursos.</string>
     <!--Donations-->
     <!--Cherrygram screens-->
+
+    <string name="CG_QuickFolderActions">Ações rápidas de pastas</string>
+    <string name="CG_QuickFolderActions_Desc">Veja e altere as pastas de um chat na tela de informações dele, e adicione a pastas os chats selecionados na lista a partir de qualquer aba de pasta.</string>
+    <string name="CG_QuickFolderActions_NotInFolders">Não está em nenhuma pasta</string>
+
 </resources>
