@@ -39,6 +39,7 @@ public class FolderFeedEntryCell extends FrameLayout implements NotificationCent
     private final TextView subtitleView;
     private final CounterView counterView;
     private final Theme.ResourcesProvider resourcesProvider;
+    private final CombinedDrawable avatarDrawable;
     private MessagesController.DialogFilter filter;
     private int account;
     private int observedAccount = -1;
@@ -50,17 +51,14 @@ public class FolderFeedEntryCell extends FrameLayout implements NotificationCent
 
         imageView = new ImageView(context);
         imageView.setScaleType(ImageView.ScaleType.CENTER);
-        CombinedDrawable drawable = Theme.createCircleDrawableWithIcon(dp(54), R.drawable.msg_folders_channels);
-        drawable.setIconSize(dp(28), dp(28));
-        Theme.setCombinedDrawableColor(drawable, Theme.getColor(Theme.key_avatar_backgroundSaved, resourcesProvider), false);
-        Theme.setCombinedDrawableColor(drawable, Theme.getColor(Theme.key_avatar_text, resourcesProvider), true);
-        imageView.setImageDrawable(drawable);
+        avatarDrawable = Theme.createCircleDrawableWithIcon(dp(54), R.drawable.msg_folders_channels);
+        avatarDrawable.setIconSize(dp(28), dp(28));
+        imageView.setImageDrawable(avatarDrawable);
         addView(imageView, LayoutHelper.createFrame(54, 54, (LocaleController.isRTL ? Gravity.RIGHT : Gravity.LEFT) | Gravity.CENTER_VERTICAL, 10, 0, 10, 0));
 
         titleView = new TextView(context);
         titleView.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 16);
         titleView.setTypeface(AndroidUtilities.bold());
-        titleView.setTextColor(Theme.getColor(Theme.key_chats_name, resourcesProvider));
         titleView.setSingleLine(true);
         titleView.setEllipsize(TextUtils.TruncateAt.END);
         titleView.setGravity(LocaleController.isRTL ? Gravity.RIGHT : Gravity.LEFT);
@@ -69,7 +67,6 @@ public class FolderFeedEntryCell extends FrameLayout implements NotificationCent
 
         subtitleView = new TextView(context);
         subtitleView.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 15);
-        subtitleView.setTextColor(Theme.getColor(Theme.key_chats_message, resourcesProvider));
         subtitleView.setSingleLine(true);
         subtitleView.setEllipsize(TextUtils.TruncateAt.END);
         subtitleView.setGravity(LocaleController.isRTL ? Gravity.RIGHT : Gravity.LEFT);
@@ -83,6 +80,20 @@ public class FolderFeedEntryCell extends FrameLayout implements NotificationCent
         addView(counterView, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, 28, Gravity.CENTER_VERTICAL, 14, 0, 14, 0));
 
         setBackground(Theme.getSelectorDrawable(false));
+        applyColors();
+    }
+
+    /**
+     * Theme colors are read here, not once: the row outlives a theme change (e.g. the automatic switch between
+     * day and night themes), and chat rows read theirs when drawn.
+     */
+    private void applyColors() {
+        Theme.setCombinedDrawableColor(avatarDrawable, Theme.getColor(Theme.key_avatar_backgroundSaved, resourcesProvider), false);
+        Theme.setCombinedDrawableColor(avatarDrawable, Theme.getColor(Theme.key_avatar_text, resourcesProvider), true);
+        imageView.invalidate();
+        titleView.setTextColor(Theme.getColor(Theme.key_chats_name, resourcesProvider));
+        subtitleView.setTextColor(Theme.getColor(Theme.key_chats_message, resourcesProvider));
+        invalidate();
     }
 
     public void setFilter(int account, MessagesController.DialogFilter filter) {
@@ -92,6 +103,7 @@ public class FolderFeedEntryCell extends FrameLayout implements NotificationCent
         if (isAttachedToWindow()) {
             setObservedAccount(account);
         }
+        applyColors();
         updateSubtitle();
         updateUnreadCounter(sameFilter);
     }
@@ -131,6 +143,8 @@ public class FolderFeedEntryCell extends FrameLayout implements NotificationCent
     @Override
     protected void onAttachedToWindow() {
         super.onAttachedToWindow();
+        NotificationCenter.getGlobalInstance().addObserver(this, NotificationCenter.didSetNewTheme);
+        applyColors();
         if (filter != null) {
             setObservedAccount(account);
             updateSubtitle();
@@ -140,12 +154,16 @@ public class FolderFeedEntryCell extends FrameLayout implements NotificationCent
     @Override
     protected void onDetachedFromWindow() {
         super.onDetachedFromWindow();
+        NotificationCenter.getGlobalInstance().removeObserver(this, NotificationCenter.didSetNewTheme);
         setObservedAccount(-1);
     }
 
     @Override
     public void didReceivedNotification(int id, int notificationAccount, Object... args) {
-        if (id == NotificationCenter.dialogsNeedReload && filter != null) {
+        if (id == NotificationCenter.didSetNewTheme) {
+            setBackground(Theme.getSelectorDrawable(false));
+            applyColors();
+        } else if (id == NotificationCenter.dialogsNeedReload && filter != null) {
             updateSubtitle();
         }
     }
